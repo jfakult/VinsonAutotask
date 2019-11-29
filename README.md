@@ -8,7 +8,7 @@ Their basic purpose is to take a field technician's travel logs and use the API 
 for more information see in-file comments
 
 ### api_relay_server.js ###
-This is a node server that listens for API requests and directs them properly. It will only send thhe API request if the requester has permission to do so.  
+This is a node server that listens for API requests and directs them properly. It will only send the API request if the requester has permission to do so.  
 This script contains the administrator credentials for the API user, and thus should only be accessible by an employee with access to it.  
 Any employee can send a request here, but this script will determine whether they have permission to relay that request to the API  
 
@@ -31,7 +31,7 @@ Used by index.js for input parsing
 
 ## How to use ##
 ### Disclaimer: ###
-        These script are still in the "rough draft" stage, so they aren't too user friendly  
+These script are still in the "rough draft" stage, so they aren't too user friendly  
 
 ### Linux ###
 * Clone the repository
@@ -43,9 +43,9 @@ Running the travel data input:
         or
         ```python
         python2 -m SimpleHTTPServer
-        ```
+        ```  
 Running the api relay server:
         ```bash
         node install
 	node api_relay_server.js
-        ```
+        ```  
