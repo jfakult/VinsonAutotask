@@ -37,15 +37,15 @@ These script are still in the "rough draft" stage, so they aren't too user frien
 * Clone the repository
 * cd into the directory
 Running the travel data input:  
-        ```python
-        python -m SimpleHTTPServer
-        ```
-        or
-        ```python
-        python2 -m SimpleHTTPServer
-        ```  
+```python
+python -m SimpleHTTPServer
+```  
+or  
+```python
+python2 -m SimpleHTTPServer
+```  
 Running the api relay server:
-        ```bash
-        node install
-	node api_relay_server.js
-        ```  
+```bash
+node install
+node api_relay_server.js
+```  
