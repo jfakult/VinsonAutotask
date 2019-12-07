@@ -13,21 +13,20 @@
  * A "TimeEntry" is used for general or regular time (pg. 325)
 */
 
-const TRACKING_IDENTIFIER = ""
-const RESOURCE_ID = ""
-const API_USERNAME = ""
-const API_PASSWORD = ""
+const https = require("https")
+var soap = require("soap")
+var privateData = require("./config.js")
 
 var requestHeader = `
 <?xml version="1.0" encoding="utf-8"?>
   <soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:x-si="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
     <soap:Header>
 	  <AutotaskIntegrations xmlns="http:autotask.net/ATWS/v1.6/">
-	    <IntegrationCode>` + TRACKING_IDENTIFIER + `</IntegrationCode>
-		<ImpersonateAsResourceID>` + RESOURCE_ID + `</ImpersonateAsResourceID>
+	    <IntegrationCode>` + privateData.TRACKING_IDENTIFIER + `</ImpersonateAsResourceID>
 	  </AutotaskIntegrations>
 	</soap:Header>
 	<soap:Body>`
+//`</IntegrationCode><ImpersonateAsResourceID>` + privateData.RESOURCE_ID 
 var requestTail = `
 	</soap:Body>
   </soap:Envelope>`
@@ -45,31 +44,100 @@ function makeParam(name, value)
 	return '<param name="' + name + '">' + value + '</param>'
 }
 
-module.exports = {
+function formatDate(dateObj)
+{
+	return dateObj.toISOString()
+}
 
+function buildTicketsQueryRequest(callback) // Queries for a list of all tickets since "last monday"
+{
+	var d = new Date()
+	var lastMonday = new Date()
+	lastMonday.setHours(0)
+	lastMonday.setMinutes(0)
+	
+	lastMonday.setDate(-1 * ((d.getDay() + 6) % 7)) // Sets date to last Monday. Don't ask me for a mathematical proof
+	var queryStringHead = "<queryxml><entity>TimeEntry</entity><query><field>StartDateTime"
+	var queryBody = "<expression op='greaterthan'>" + formatDate(lastMonday) + "</expression>"
+	var queryStringTail = "</field></query></queryxml>"
+	var temp = sendRequest(queryStringHead + queryBody + queryStringTail, callback)
+}
+
+function sendRequest(soapXML, callback)
+{
+	//console.log(callback)
+	/*soap.createClient(url, function(err, client)
+	{
+		client.setSecurity(new soap.BasicAuthSecurity(privateData.API_PASSWORD, privateData.API_USERNAME)));
+		client.MyFunction(args, function(err, result)
+		{
+			console.log(result);
+		});
+
+	});*/
+
+	SOAP_OPTIONS = {
+		host: "webservices3.autotask.net",
+		port: 443,
+		method: "POST",
+		path: "/atservices/1.6/atws.asmx", // To use version 1.6 change to /atservices/1.6/atws.asmx
+		// authentication headers
+		headers: {
+		    'Content-Type': "text/xml; charset=utf-8",
+		    'Content-Length': Buffer.byteLength(soapXML),
+		    'Authorization': "Basic " + new Buffer(privateData.API_USERNAME + ":" + privateData.API_PASSWORD).toString("base64"),
+		    //'SOAPAction': "http://autotask.net/ATWS/v1_6/getThresholdAndUsageInfo",
+		    'Accept': "application/json"
+		}
+	}
+
+	request = https.request(SOAP_OPTIONS, function (res) {
+		//console.log("statusCode:", res.statusCode);
+
+		res.on("data", (d) => {
+			//console.log(d.toString());
+			responseData = d.toString()
+
+			callback(responseData)
+		})	
+	});
+
+	request.on("error", (e) => {
+	    console.error(e);
+	});
+
+	request.end(soapXML)
+}
+
+module.exports =
+{
 	// List of Supported request types:
-	REQ_ClientQuery : 1,    // User wants to find the client of the given name
+	REQ_temp : 1,    // User wants to find the client of the given name
 	REQ_ExpenseReport : 2,  // User wants to submit an expense report
 	REQ_TravelTime : 4,     // User wants to log travel time into a yearly project
+	REQ_Tickets : 8,         // Get ticket information for the previous week
 
 	// Dispatches the proper request building function
-	buildAPIRequest : function(requestType, data)
+	buildAPIRequest : function(requestType, data, callback)
 	{
 		var responses = []
-		if ((requestType & REQ_ClientQuery) == REQ_ClientQuery)
+		if ((requestType & REQ_Tickets) == REQ_Tickets)
 		{
-			console.log("Sending query to find client '" + data)
-			responses.push(buildClientQueryRequest(data))
+			console.log("Sending query for this weeks tickets '" + data)
+			var tickets = buildTicketsQueryRequest(data, callback)
+			var travelData = extrapolateTicketTravelData(tickets, callback) // TODO
+
+			responses.push(tickets)
 		}
 		if ((requestType & REQ_ExpenseReport) == REQ_ExpenseReport)
 		{
 			console.log("Sending request to create new expense report")
-			responses.push(buildExpenseReportRequest(data))
+			responses.push(buildExpenseReportRequest(data, callback))
 		}
 		if ((requestType & REQ_TravelTime) == REQ_TravelTime)
 		{
 			console.log("Sending request to log new travel time")
-			responses.push(buildTravelTimeRequest(data))
+			responses.push(buildTravelTimeRequest(data, callback))
 		}
 
 		console.log("Returned results:")
@@ -79,7 +147,8 @@ module.exports = {
 			console.log(responses[i])
 		}
 	},
-	
+
+	/*
 	// Uses a binary search to find the client.
 	// If multiple clients are returned, it queries a larger amount of the string
 	// If no clients are returned it queries a smaller portion of the string
@@ -114,7 +183,7 @@ module.exports = {
 
 			return buildClientQueryRequest(client, max, stepSize)
 		}
-	},
+	},*/ // This function is vestigial
 	
 	// Uses the ExpenseItem API field
 	// Required fields as follows:
@@ -130,7 +199,7 @@ module.exports = {
 	// Miles : Int
 	// OdometerStart
 	// OdometerEnd
-	buildAddExpenseReportRequest : function(reportObject)
+	buildAddExpenseReportRequest : function(reportObject, callback) // Note: Needs <create> tag surrounding the entity tag
 	{
 		var createString = ""
 
@@ -146,9 +215,9 @@ module.exports = {
 		createString += makeParam("odometerStart", "") + "\n"
 		createString += makeParam("odometerEnd", "") + "\n"
 
-		var expenseResponse = sendRequest(createString)
+		var expenseResponse = sendRequest(createString, callback)
 
-		return expenseResponse
+		//return expenseResponse
 	},
 	
 	// Uses the __ API field
@@ -182,58 +251,15 @@ module.exports = {
 		createString += makeParam("SummaryNotes", "Travel from x to x") + "\n"
 		createString += makeParam("taskID", "") + "\n"
 
-		var travelTimeResponse = sendRequest(createString)
+		var travelTimeResponse = sendRequest(createString, callback)
 
-		return travelTimeResponse
+		//return travelTimeResponse
 	},
-	
-	// AJAX / JQuery method for posting
-	/*sendRequest : function()
-	{
-		$.post({
-			url: "webservices3.autotask.net/atservices/1.6/atws.asmx",
-			// authentication headers
-			headers: {
-				'Content-Type': "text/xml; charset=utf-8",
-				//'Content-Length': xml.length,
-				'Authorization': "Basic " + (API_USERNAME + ":" + API_PASSWORD).toString("base64"),
-				'SOAPAction': "http://autotask.net/ATWS/v1_6/getThresholdAndUsageInfo",
-				'Accept': "application/json"
-			}
-		}, function(response) {
-			console.log(response)
-		});
-	}*/
 
-	var SOAP_OPTIONS = {
-    		host: "webservices3.autotask.net",
-    		port: 443,
-    		method: "POST",
-    		path: "/atservices/1.6/atws.asmx", // To use version 1.6 change to /atservices/1.6/atws.asmx
-    		// authentication headers
-    		headers: {
-    		    'Content-Type': "text/xml; charset=utf-8",
-    		    'Content-Length': Buffer.byteLength(xml),
-    		    'Authorization': "Basic " + new Buffer(API_PASSWORD + ":" + API_USERNAME).toString("base64"),
-    		   SOAPAction': "http://autotask.net/ATWS/v1_6/getThresholdAndUsageInfo",
-    		    'Accept': "application/json"
-    		}
-	},
-	
-	sendRequest : function()
-	{
-		request = https.request(SOAP_OPTIONS, function (res) {
-		    console.log("statusCode:", res.statusCode);
-		
-		    res.on("data", (d) => {
-		        process.stdout.write(d);
-		    });
-		});
-	
-		request.on("error", (e) => {
-		    console.error(e);
-		});
-		request.end(xml);
-	},
+	formatDate : formatDate,
+
+	buildTicketsQueryRequest : buildTicketsQueryRequest,
+
+	sendRequest : sendRequest
 	
 }; // Closing bracket of module exports
