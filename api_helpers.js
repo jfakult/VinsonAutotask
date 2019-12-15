@@ -3,7 +3,7 @@
 
 /*
  * This script is called by api_relay_server.js. api_relay_server.js is the main node server.
- * This script just contains the more "heavy" code needed to generate and interpret API requests/responses.
+ * This script just contains the code needed to generate and interpret API requests/responses.
  * 
  * API Notes:
  * An employee is considered a "Resource" in the API (pg. 236)
@@ -14,22 +14,55 @@
 */
 
 const https = require("https")
-var soap = require("soap")
-var privateData = require("./config.js")
+var config = require("./config.js")
+var xml2js = require("xml2js").parseString
 
-var requestHeader = `
+var EXPENSE_TITLE = "Gas Expenses" // name of the expense report. The month will be added (e.g EXPENSE_TITLE="Gas" will create the report: "Gas for August 2019")
+var TRAVEL_DESCRIPTION = "Travel from" // Same as above
+
+var contractIDToAccountIDMap = {}
+var travelDistanceMap = {}
+var addressToAccountIDMap = {}
+var accountIDToAnnualProjectMap = {}
+var annualProjectIDToTaskIDMap = {}
+
+/*var requestHeader = `
 <?xml version="1.0" encoding="utf-8"?>
-  <soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:x-si="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
-    <soap:Header>
-	  <AutotaskIntegrations xmlns="http:autotask.net/ATWS/v1.6/">
-	    <IntegrationCode>` + privateData.TRACKING_IDENTIFIER + `</ImpersonateAsResourceID>
-	  </AutotaskIntegrations>
-	</soap:Header>
-	<soap:Body>`
-//`</IntegrationCode><ImpersonateAsResourceID>` + privateData.RESOURCE_ID 
+  <soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+    <soap12:Header>` +
+    //`<soap12:upgrade xmlns:soap12="http://www.w3.org/2003/05/soap-envelope"><soap12:supportedenvelope qname="soap:Envelope" xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap12:supportedenvelope qname="soap12:Envelope" xmlns:soap12="http://www.w3.org/2003/05/soap-envelope"></soap12:supportedenvelope></soap12:supportedenvelope></soap12:upgrade>` +
+	  `<AutotaskIntegrations xmlns="http:autotask.net/ATWS/v1.6/">
+	    <IntegrationCode>` + privateData.TRACKING_IDENTIFIER + `</IntegrationCode>` +
+	    //`<ImpersonateAsResourceID></ImpersonateAsResourceID>` +
+	  `</AutotaskIntegrations>
+	</soap12:Header>
+	<soap:Body> `
+//	`<getThresholdAndUsageInfo xmlns="http://autotask.net/ATWS/v1_6/"></getThresholdAndUsageInfo>` +
 var requestTail = `
 	</soap:Body>
-  </soap:Envelope>`
+  </soap:Envelope>`*/
+
+var requestHeader = '<?xml version="1.0" encoding="utf-8"?>' +
+"<soap:Envelope " +
+'xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" ' +
+'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ' +
+'xmlns:xsd="http://www.w3.org/2001/XMLSchema">' +
+"<soap:Header>" +
+'<AutotaskIntegrations xmlns="http://autotask.net/ATWS/v1_6/">' + // To use version 1.6 change to http://autotask.net/ATWS/v1_6/
+"<PartnerID>" +
+"</PartnerID>" +
+"<IntegrationCode>" +
+config.TRACKING_IDENTIFIER +
+"</IntegrationCode>" +
+//"<ImpersonateAsResourceID>" +
+// For version 1.6 only insert id of a resource you want to impersonate
+//"</ImpersonateAsResourceID>" +
+"</AutotaskIntegrations>" +
+"</soap:Header>" +
+"<soap:Body>"
+//"<getThresholdAndUsageInfo xmlns='http://autotask.net/ATWS/v1_6/'></getThresholdAndUsageInfo>" // To use version 1.6 change to http://autotask.net/ATWS/v1_6/
+var requestTail = "</soap:Body>" +
+"</soap:Envelope>";
 
 // Cleaning up inputs to deny string injection attacks
 function clean(val)
@@ -49,23 +82,121 @@ function formatDate(dateObj)
 	return dateObj.toISOString()
 }
 
-function buildTicketsQueryRequest(callback) // Queries for a list of all tickets since "last monday"
+function buildTicketsQueryRequest(resourceID, callback) // Queries for a list of all tickets since "last monday"
 {
-	var d = new Date()
 	var lastMonday = new Date()
 	lastMonday.setHours(0)
 	lastMonday.setMinutes(0)
-	
-	lastMonday.setDate(-1 * ((d.getDay() + 6) % 7)) // Sets date to last Monday. Don't ask me for a mathematical proof
-	var queryStringHead = "<queryxml><entity>TimeEntry</entity><query><field>StartDateTime"
+
+	lastMonday.setDate(lastMonday.getDate() - ((lastMonday.getDay() + 6) % 7)) // Sets date to last Monday. Don't ask me for a mathematical proof
+
+	var queryStringHead = "<query xmlns='http://autotask.net/ATWS/v1_6/'><sXML><![CDATA[<queryxml><entity>TimeEntry</entity><query><field>StartDateTime"
 	var queryBody = "<expression op='greaterthan'>" + formatDate(lastMonday) + "</expression>"
-	var queryStringTail = "</field></query></queryxml>"
+	queryBody += "</field><field>ResourceID<expression op='equals'>" + resourceID + "</expression>"
+	var queryStringTail = "</field></query></queryxml>]]></sXML></query>"
+
 	var temp = sendRequest(queryStringHead + queryBody + queryStringTail, callback)
 }
 
-function sendRequest(soapXML, callback)
+function buildResourceQueryRequest(resourceEmail, callback)
 {
-	//console.log(callback)
+	var queryStringHead = "<query xmlns='http://autotask.net/ATWS/v1_6/'><sXML><![CDATA[<queryxml><entity>Resource</entity><query><field>Email"
+	var queryBody = "<expression op='equals'>" + resourceEmail + "</expression>"
+	var queryStringTail = "</field></query></queryxml>]]></sXML></query>"
+	var temp = sendRequest(queryStringHead + queryBody + queryStringTail, callback)
+}
+
+// Note: Since this function makes all calls asynchronously, the account IDs may come back out of order. Use the map to ensure you have the correct account when referencing
+function buildContractIDsQueryRequest(contractIDs, callback)
+{
+	var accountIDs = []
+
+	var queryStringHead = "<query xmlns='http://autotask.net/ATWS/v1_6/'><sXML><![CDATA[<queryxml><entity>Contract</entity><query><field>id"
+	var queryStringTail = "</field></query></queryxml>]]></sXML></query>"
+	var queries = ""
+	for (var i = 0; i < contractIDs.length; i++)
+	{
+			
+		var contractID = contractIDs[i]
+
+		if (contractIDToAccountIDMap[contractID] != undefined) // Check to see if we have already seen this contractID
+		{
+			accountIDs.push(contractIDToAccountIDMap[contractID])
+			return
+			//continue
+		}
+
+		queries += "<expression op='equals'>" + contractIDs[i] + "</expression>"
+	}
+
+	sendRequest(queryStringHead + queries + queryStringTail, function(apiResponse) {
+		xml2js(apiResponse, function(err, result) {
+			//console.log("---" + JSON.stringify(result))
+			var contracts = getEntities(result)
+			
+			for (var i = 0; i < contracts.length; i++)
+			{
+				accountID = contracts[i].AccountID[0]._
+
+				contractIDToAccountIDMap[contracts[i].id[0]] = accountID
+
+				accountIDs.push(accountID)
+			}
+
+			callback(accountIDs)
+
+		})
+	})
+}
+
+function j(str)
+{
+	return JSON.stringify(str, null, 4)
+}
+
+function buildAccountIDsQueryRequest(accountIDs, callback)
+{
+	var accountsData = {}
+
+	var queryStringHead = "<query xmlns='http://autotask.net/ATWS/v1_6/'><sXML><![CDATA[<queryxml><entity>Account</entity><query><field>id"
+	var queryStringTail = "</field></query></queryxml>]]></sXML></query>"
+	var queries = ""
+	for (var i = 0; i < accountIDs.length; i++)
+	{
+			
+		var accountID = accountIDs[i]
+
+		queries += "<expression op='equals'>" + accountIDs[i] + "</expression>"
+	}
+
+	sendRequest(queryStringHead + queries + queryStringTail, function(apiResponse) {
+		xml2js(apiResponse, function(err, result) {
+			var accounts = getEntities(result)
+
+			for (var i = 0; i < accounts.length; i++)
+			{
+				var accountData = {}
+			
+				accountData.Address1 = accounts[i].Address1[0]._
+				accountData.AccountName = accounts[i].AccountName[0]._
+				accountData.PostalCode = accounts[i].PostalCode[0]._
+				accountData.City = accounts[i].City[0]._
+				accountData.State = accounts[i].State[0]._
+				//accountsData[id] = accounts[i].id[0]._
+
+				addressToAccountIDMap[getAccountAddress(accountData)] = accounts[i].id[0]
+				accountsData[accounts[i].id[0]] = accountData
+			}
+
+
+			callback(accountsData)
+		})
+	})
+
+}
+function sendRequest(soapXML, callback, action = "query", log = false)
+{
+	//if (soapXML.indexOf("29684145") >= 0) return undefined
 	/*soap.createClient(url, function(err, client)
 	{
 		client.setSecurity(new soap.BasicAuthSecurity(privateData.API_PASSWORD, privateData.API_USERNAME)));
@@ -76,6 +207,10 @@ function sendRequest(soapXML, callback)
 
 	});*/
 
+	soapXML = requestHeader + soapXML + requestTail
+
+	//callback(soapXML)
+
 	SOAP_OPTIONS = {
 		host: "webservices3.autotask.net",
 		port: 443,
@@ -85,181 +220,796 @@ function sendRequest(soapXML, callback)
 		headers: {
 		    'Content-Type': "text/xml; charset=utf-8",
 		    'Content-Length': Buffer.byteLength(soapXML),
-		    'Authorization': "Basic " + new Buffer(privateData.API_USERNAME + ":" + privateData.API_PASSWORD).toString("base64"),
-		    //'SOAPAction': "http://autotask.net/ATWS/v1_6/getThresholdAndUsageInfo",
+		    'Authorization': "Basic " + new Buffer(config.API_USERNAME + ":" + config.API_PASSWORD).toString("base64"),
+		    'SOAPAction': "http://autotask.net/ATWS/v1_6/" + action,
 		    'Accept': "application/json"
 		}
 	}
 
+	var index = 0
+
+	responseData = ""
+
 	request = https.request(SOAP_OPTIONS, function (res) {
 		//console.log("statusCode:", res.statusCode);
-
+		//console.log('headers:', res.headers);
+		
 		res.on("data", (d) => {
-			//console.log(d.toString());
-			responseData = d.toString()
+			if (log)
+				console.log("Send: " + d.toString());
+			responseData += d.toString()
+			//callback(responseData)
+		});
 
+		res.on("end", () => {
 			callback(responseData)
-		})	
+		});
 	});
 
 	request.on("error", (e) => {
-	    console.error(e);
+	    console.error("error: " + e);
 	});
 
-	request.end(soapXML)
+	//console.log(soapXML)
+	//callback(soapXML)
+	request.end(soapXML.toString())	
+}
+
+function getEntities(xmlObject)
+{
+	//console.log("---" + JSON.stringify(xmlObject["soap:Envelope"]["soap:Body"][0].queryResponse[0].queryResult[0].EntityResults[0].Entity) + "\n\n")
+
+	try
+	{
+		//console.log(xmlObject["soap:Envelope"]["soap:Body"][0].queryResponse[0].queryResult[0].EntityResults[0])
+		return xmlObject["soap:Envelope"]["soap:Body"][0].queryResponse[0].queryResult[0].EntityResults[0].Entity
+	}
+	catch (e) { return undefined }
+}
+
+function getCreateEntities(xmlObject)
+{
+	//console.log("---" + JSON.stringify(xmlObject["soap:Envelope"]["soap:Body"][0].queryResponse[0].queryResult[0].EntityResults[0].Entity) + "\n\n")
+
+	try
+	{
+		return xmlObject["soap:Envelope"]["soap:Body"][0].createResponse[0].createResult[0].EntityResults[0].Entity
+	}
+	catch (e) { return undefined }
+}
+
+function getAccountAddress(accountData)
+{
+	return accountData.Address1 + " " + accountData.City + ", " + accountData.State + " " + accountData.PostalCode
+}
+
+function roundToNearest15(startTime, endTime, inc = 4) // Round the hour into "inc" (increments) chunks. inc = 2 rounds to the half hour. 4 rounds to the nearest 15 mins
+{
+	var hours = (new Date(endTime - startTime) / 1000) / 3600
+
+	var roundedHours = Math.round(hours * inc) / inc     // round to every quarter hour
+
+	return roundedHours
+}
+
+var homeAddress = "29156 Chardon rd Willoughby Hills, Ohio"
+function extrapolateTravelData(ticketsData, accountsData, callback)
+{
+	var travelData = []  // An array where each index has the travel data for a single day (travelData[0] is Monday's travel data, etc)
+
+	//var lastFromAddress = homeAddress
+	var lastToAddress = homeAddress
+	var lastArriveTime = -1
+	var lastTicketEndTime = -1
+	var lastFromName = "Home"
+	var lastAccountID = -1
+	var currentDay = undefined
+
+	if (ticketsData.length > 0) // Initialize the day. We want to seperate travel time by which day it occured
+	{
+		currentDay = new Date(ticketsData[0].StartDateTime).getDate()
+	}
+
+	var travelForDay = []      // Stores the information for a single day of travelling
+	var trip = {}
+	for (var i = 0; i < ticketsData.length; i++)
+	{
+		var ticket = ticketsData[i]
+		var trip = {}
+
+		var ticketAccountID = contractIDToAccountIDMap[ticket.ContractID]
+
+		if (ticketAccountID == undefined) // This should never happen?
+		{
+			console.log("Unknown ticket contract: " + ticket.ContractID)
+			continue
+		}
+
+		var accountData = accountsData[ticketAccountID]
+
+		var accountAddress = getAccountAddress(accountData)
+		var accountName = accountData.AccountName
+
+		if (accountAddress == lastToAddress)
+		{
+			lastTicketEndTime = ticket.EndDateTime
+			continue   // We entered multiple tickets in a row here. No driving needs to be logged
+		}
+
+		var ticketDay = new Date(ticket.StartDateTime).getDate()
+
+		// Log data for arriving home and the new day
+		if (ticketDay != currentDay)
+		{
+			trip.fromAddress = lastToAddress
+			trip.toAddress = homeAddress
+			trip.leaveTime = lastTicketEndTime //new Date(ticket.EndDateTime) // convert to ms timestamp
+			trip.arriveTime = -1
+			trip.totalTimeHours = roundToNearest15(trip.leaveTime, trip.arriveTime)
+			trip.fromName = lastFromName
+			trip.toName = "Home"
+			trip.fromAccountID = lastAccountID
+			trip.toAccountID = -1
+			travelForDay.push(trip)
+
+			//lastFromAddress = homeAddress
+			lastArriveTime = -1
+			lastToAddress = homeAddress
+			lastTicketEndTime = -1
+			lastAccountID = -1
+			lastFromName = "Home"
+
+			travelData.push(travelForDay)
+			travelForDay = []
+
+			currentDay = ticketDay
+		
+			continue
+		}
+
+		// Log data when we are arriving at a new school
+		trip.fromAddress = lastToAddress
+		trip.toAddress = accountAddress
+		trip.leaveTime = lastTicketEndTime
+		trip.arriveTime = new Date(ticket.StartDateTime)
+		trip.fromName = lastFromName
+		trip.toName = accountName
+		trip.totalTimeHours = roundToNearest15(trip.leaveTime, trip.arriveTime)
+		trip.fromAccountID = lastAccountID
+		trip.toAccountID = ticketAccountID
+	
+		//lastFromAddress = lastToAddress
+		lastToAddress = accountAddress
+		lastTicketEndTime = new Date(ticket.EndDateTime)
+		lastAccountID = ticketAccountID
+		lastFromName = accountName
+
+		travelForDay.push(trip)
+	}
+
+	if (travelForDay.length > 0)
+	{
+		tripHome = {}
+		tripHome.fromAddress = lastToAddress
+		tripHome.toAddress = homeAddress
+		tripHome.fromName = lastFromName
+		tripHome.toName = "Home"
+		tripHome.fromAccountID = lastAccountID
+		tripHome.toAccountID = -1
+		tripHome.leaveTime = lastTicketEndTime
+		tripHome.arriveTime = -1
+		tripHome.totalTimeHours = -1
+
+		travelForDay.push(tripHome) // Should this be here or outside of this if statement
+
+		travelData.push(travelForDay)
+	}
+
+	callback(travelData)
+}
+
+//Sorts tickets by EndDateTime (day then time)
+function sortTickets(tickets)
+{
+	tickets.sort(function(a, b) {
+	    	return (new Date(a.EndDateTime) - new Date(b.EndDateTime));
+	});
+
+	return tickets
+}
+
+function longestCommonSubstring(a, b)
+{
+	let len = b.length, originalLen = b.length;
+	do
+	{
+		for ( let i = 0; i <= originalLen - len; i++ )
+		{
+			let needle = b.substr( i, len );
+			if ( a.indexOf( needle ) !== -1 ) return needle;
+		}
+	} while ( len-- > 0 );
+
+	return "";
+}
+
+// Given an address and an array of addresses, return the one with the longest matching substring
+function findAddress(address, addresses)
+{
+	address = address.replaceAll(",", "")
+	//console.log("Checking: " + address)
+	var longestSubstringIndex = 0
+	var longestSubstring = ""
+
+	for (var i = 0; i < addresses.length; i++)
+	{
+		var a = addresses[i]
+		a = a.replaceAll(",", "")
+
+		//console.log("Comparing: " + a)
+
+		var substring = longestCommonSubstring(a.toLowerCase(), address.toLowerCase())
+
+		//console.log("subString: " + substring)
+
+		if (substring.length > longestSubstring.length)
+		{
+			longestSubstring = substring
+			//console.log("Found new longest: " + substring.length)
+			longestSubstringIndex = i
+		}
+	}
+
+	//console.log("Returning: " + longestSubstringIndex + "\n\n\n")
+
+	return [address, addresses[longestSubstringIndex]]
+}
+
+var months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" ]
+function buildUploadDataRequest(travelData, requesterID, callback)
+{
+	buildAddTravelTimeRequest(travelData, requesterID, function(apiResponse)
+	{
+		console.log("Success or failed adding travel time")
+
+		return
+
+		var firstTrip = travelData[0][0]                       // There should have been an "empty check" by now
+		var lastTrip = travelData[travelData.length - 1][travelData.slice(-1)[0].length -1] // Javascript magic
+
+		var startMonth = months[ (new Date(firstTrip.arriveTime)).getMonth() ]  //arrive because it is the first non-home trip of the month
+		var endMonth = months[ (new Date(lastTrip.leaveTime)).getMonth() ]	//leave for same reason as above
+
+		
+		var startYear = (new Date(firstTrip.arriveTime)).getFullYear()
+		var endYear = (new Date(lastTrip.leaveTime)).getFullYear()
+
+		var startDesiredName = EXPENSE_TITLE + " for " + startMonth + " " + startYear
+		var endDesiredName = EXPENSE_TITLE + " for " + endMonth + " " + endYear
+
+		buildFindExpenseReportQuery(startDesiredName, function(startExpenseReportID) {   // Technically this may cause issues for the edge case
+			if (startExpenseReportID == -1)					      // Where the user creates expense reports for the entire year
+			{								      // AND calls them by the exact same name as this program wants to call them
+				buildCreateExpenseReportRequest(startDesiredName, firstTrip.arriveTime, requesterID, function(newStartExpenseReportID) {
+					//console.log("New report: " + j(newStartExpenseReportID))
+					if (startMonth != endMonth)
+					{
+						buildCreateExpenseReport(endDesiredName, lastTrip.leaveTime, requesterID, function(endExpenseReportID) {
+							// Upload data
+							//callback(newStartExpenseReportID + " " + endExpenseReportID)
+							buildAddExpenseItemsRequest(travelData.slice, newStartExpenseReportID, function(apiResponse) {
+								callback(apiResponse)
+							})
+						})
+					}
+					else
+					{
+						buildAddExpenseItemsRequest(travelData, newStartExpenseReportID, function(apiResponse) {
+							callback(apiResponse)
+						})
+					}
+				})
+			}
+			else if (startMonth != endMonth) // Split tickets into two sections
+			{
+				buildCreateExpenseReport(endDesiredName, lastTrip.leaveTime, requesterID, function(endExpenseReportID) {
+					// Upload data
+					buildAddExpenseItemsRequest(travelData.slice, newStartExpenseReportID, function(apiResponse) {
+						callback(apiResponse)
+					})
+				})
+			}
+			else
+			{
+				buildAddExpenseItemsRequest(travelData.slice(0, 1), startExpenseReportID, function(apiResponse) {
+					//console.log(j(apiResponse))
+					callback(apiResponse)
+				})
+			}
+		})
+	})
+}
+
+function buildFindTravelProjectTaskQuery(projectIDs, callback)
+{
+	var taskIDs = []
+
+	var queryStringHead = "<query xmlns='http://autotask.net/ATWS/v1_6/'><sXML><![CDATA[<queryxml><entity>Task</entity><query>"//<field>ProjectID"
+	var queryStringTail = "</field></query></queryxml>]]></sXML></query>"
+	
+	var query = ""
+	/*for (var i = 0; i < projectIDs.length; i++)
+	{
+		query += "<expression op='equals'>" + projectIDs[i] + "</expression>"
+	}*/
+
+	query += "<field>Title"
+	query += "<expression op='equals'>" + "Travel Time" + "</expression>"
+
+	sendRequest(queryStringHead + query + queryStringTail, function(apiResponse) {
+		xml2js(apiResponse, function(err, result) {
+			var projects = getEntities(result)
+			if (projects == undefined || projects.length == 0)
+			{
+				console.log("No project tasks found: " + apiResponse)
+				callback([])
+			}
+			else
+			{
+				for (var i = 0; i < projects.length; i++)
+				{
+					if (projectIDs.indexOf(projects[i].ProjectID[0]._) >= 0)
+					{
+						annualProjectIDToTaskIDMap[projects[i].ProjectID[0]._] = projects[i].id[0]
+						taskIDs.push(projects[i].id[0])
+					}
+				}
+				//console.log(j(result))
+				callback(taskIDs)
+			}
+		})
+	})
+
+}
+
+// For there seems to be some glitch in the API where having multiple expressions per field and multiple fields
+// The result is that only the first expression is evaluated and the others are ignored
+function buildFindTravelProjectQuery(accountIDs, callback)
+{
+	var projectIDs = []
+	var currentYear = new Date()
+	var endYear = currentYear.getFullYear()
+	if (currentYear.getMonth() >= 7) // Starting from August, the new project will be ending during the next fiscal year
+		endYear++
+	currentYear.setMonth(0)
+	currentYear.setDate(1)
+	currentYear.setHours(1)
+
+	var queryStringHead = "<query xmlns='http://autotask.net/ATWS/v1_6/'><sXML><![CDATA[<queryxml><entity>Project</entity><query>"//<field>AccountID"
+	var queryStringTail = "</field></query></queryxml>]]></sXML></query>"
+
+	var query = ""
+	
+	/*for (var i = 0; i < accountIDs.length; i++)
+	{
+		query += "<expression op='equals'>" + accountIDs[i] + "</expression>"
+	}*/
+	
+	query += "<field>ProjectName"
+	query += "<expression op='contains'>" + endYear + " Annual Project" + "</expression>"
+	query += "</field><field>CreateDateTime"
+	query += "<expression op='greaterthan'>" + currentYear.toISOString() + "</expression>"
+
+	//console.log(queryStringHead + query + queryStringTail)
+	sendRequest(queryStringHead + query + queryStringTail, function(apiResponse) {
+		//console.log(apiResponse)
+		xml2js(apiResponse, function(err, result) {
+			var projects = getEntities(result)
+			if (projects == undefined || projects.length == 0)
+			{
+				console.log("No expense reports found (creating a new one): " + apiResponse)
+				callback([])
+			}
+			else
+			{
+				for (var i = 0; i < projects.length; i++)
+				{
+					if (accountIDs.indexOf(projects[i].AccountID[0]._) >= 0)
+					{
+						//console.log(j(projects[i]))
+						accountIDToAnnualProjectMap[projects[i].AccountID[0]._] = projects[i].id[0]
+						projectIDs.push(projects[i].id[0])
+					}
+				}
+				callback(projectIDs)
+			}
+		})
+	})
+
+}
+
+function buildRolesQuery(resourceIDs, callback)
+{
+	var reportID = -1
+
+	var queryStringHead = "<query xmlns='http://autotask.net/ATWS/v1_6/'><sXML><![CDATA[<queryxml><entity>Role</entity><query><field>ID"
+	var queryStringTail = "</field></query></queryxml>]]></sXML></query>"
+	
+	var query = ""
+	for (var i = 0; i < resourceIDs.length; i++)
+	{
+		query += "<expression op='equals'>" + resourceIDs[i] + "</expression>"
+	}
+
+	console.log(queryStringHead + query + queryStringTail)
+	sendRequest(queryStringHead + query + queryStringTail, function(apiResponse) {
+		xml2js(apiResponse, function(err, result) {
+			var reports = getEntities(result)
+			if (reports == undefined || reports.length == 0)
+			{
+				console.log("No expense reports found (creating a new one): " + apiResponse)
+				callback(-1)
+			}
+			else
+			{
+				//console.log(j(reports))
+				//reportID = reports[0].id[0]
+
+				callback(result)
+			}
+		})
+	})
+
+}
+
+function buildResourceRoleQuery(resourceID, callback)
+{
+	var reportID = -1
+
+	var queryStringHead = "<query xmlns='http://autotask.net/ATWS/v1_6/'><sXML><![CDATA[<queryxml><entity>ResourceRole</entity><query><field>ResourceID"
+	var queryStringTail = "</field></query></queryxml>]]></sXML></query>"
+	
+	var query = "<expression op='equals'>" + resourceID + "</expression>"
+
+	sendRequest(queryStringHead + query + queryStringTail, function(apiResponse) {
+		xml2js(apiResponse, function(err, result) {
+			var reports = getEntities(result)
+			if (reports == undefined || reports.length == 0)
+			{
+				console.log("No expense ResourceRoles found : " + apiResponse)
+				callback(-1)
+			}
+			else
+			{
+				//console.log(j(reports))
+				//reportID = reports[0].id[0]
+
+				callback(result)
+			}
+		})
+	})
+
+}
+
+function buildFindExpenseReportQuery(desiredName, callback)
+{
+	var reportID = -1
+
+	var queryStringHead = "<query xmlns='http://autotask.net/ATWS/v1_6/'><sXML><![CDATA[<queryxml><entity>ExpenseReport</entity><query><field>name"
+	var queryStringTail = "</field></query></queryxml>]]></sXML></query>"
+	
+	var query = "<expression op='equals'>" + desiredName + "</expression>"
+
+	sendRequest(queryStringHead + query + queryStringTail, function(apiResponse) {
+		xml2js(apiResponse, function(err, result) {
+			var reports = getEntities(result)
+			if (reports == undefined || reports.length == 0)
+			{
+				console.log("No expense reports found (creating a new one): ")
+				callback(-1)
+			}
+			else
+			{
+				//console.log(j(reports))
+				reportID = reports[0].id[0]
+
+				callback(reportID)
+			}
+		})
+	})
+
+}
+
+function buildCreateExpenseReportRequest(desiredName, ticketDate, requesterID, callback)
+{
+	var monthEndDate = new Date(ticketDate)   // Set the expense report to end at the end of the month
+	monthEndDate.setMonth(monthEndDate.getMonth() + 1) // Set the date to next month
+	monthEndDate.setDate(0)      // This will wrap the date to the last day of the previous month
+	monthEndDate.setHours(23)    // just before midnight
+	monthEndDate.setMinutes(59)  // "
+	monthEndDate.setSeconds(59)  // "
+
+	var queryStringHead = "<create xmlns='http://autotask.net/ATWS/v1_6/'><Entities>"
+	var queryStringTail = "</Entities></create>"
+	var query =     "<Entity xsi:type='ExpenseReport' xmlns:xsi='http://www.w3.org/2001/XMLSchema-instance'>" +
+			"<Name>" + desiredName + "</Name>" +
+			"<SubmitterID>" + requesterID + "</SubmitterID>" +
+			"<WeekEnding>" + monthEndDate.toISOString() + "</WeekEnding>"  +
+			"</Entity>"
+
+	//console.log(queryStringHead + query + queryStringTail)
+
+	sendRequest(queryStringHead + query + queryStringTail, function(apiResponse) {
+		xml2js(apiResponse, function(err, result) {
+			var entity = getCreateEntities(result)[0]
+
+			callback(parseInt(entity.id[0]))
+			//callback(result)
+		})
+	}, "create")
+}
+
+// Uses the ExpenseItem API field
+// Required fields as follows:
+// BillableToAccount : bool
+// Description : String
+// ExpenseCategory : ?
+// ExpenseDate : Date
+// ExpenseReportId : ID of associated expense report
+// HaveReceipt : Boolean
+// ID : String? (ID of expense item)
+//
+// Non-Required fields as follows:
+// Miles : Int
+// OdometerStart
+// OdometerEnd
+function buildAddExpenseItemsRequest(travelData, expenseReportID, callback) // Note: Needs <create> tag surrounding the entity tag
+{
+	var queryStringHead = "<create xmlns='http://autotask.net/ATWS/v1_6/'><Entities>"
+	var queryStringTail = "</Entities></create>"
+	var query = ""
+	for (var i = 0; i < 1; i++)//travelData.length; i++)
+	{
+		var day = travelData[i]
+		for (var j = 0; j < 1; j++)//day.length; j++)
+		{
+			var trip = day[j]
+
+			var associatedAccount = trip.toAccountID
+			if (associatedAccount == -1)
+				associatedAccount = trip.fromAccountID
+			if (associatedAccount == -1)
+				continue
+
+			if (accountIDToAnnualProjectMap[associatedAccount])
+			{
+				travelData[i][j] = accountIDToAnnualProjectMap
+				trip.annualProjectID = travelData[i][j]
+			}
+
+			var ticketDate = trip.arriveTime
+			if (ticketDate == -1)
+				ticketDate = ticket.leaveTime
+			if (ticketDate == -1)
+				continue
+
+			query +=	"<Entity xsi:type='ExpenseItem' xmlns:xsi='http://www.w3.org/2001/XMLSchema-instance'>" +
+						"<AccountID>" + associatedAccount + "</AccountID>" +
+						"<ReceiptAmount>" + parseFloat(trip.distance) * config.DOLLARS_PER_MILE + "</ReceiptAmount>" +
+						"<BillableToAccount>" + "true" + "</BillableToAccount>" +
+						"<Description>" + TRAVEL_DESCRIPTION + " " + trip.fromName + " to " + trip.toName + "</Description>" +
+						"<Destination>" + trip.toName + "</Destination>" +
+						"<ExpenseCategory>" + 2 + "</ExpenseCategory>" + // 2 = Mileage
+						"<ExpenseDate>" + ticketDate.toISOString() + "</ExpenseDate>" +
+						"<ExpenseReportID>" + expenseReportID + "</ExpenseReportID>" +
+						"<HaveReceipt>" + "true" + "</HaveReceipt>" +
+						"<Miles>" + trip.distance + "</Miles>" +
+						"<Origin>" + trip.fromName + "</Origin>" +
+						"<PaymentType>" + 14 + "</PaymentType>" + // Associated with the "Expense Type" field. 14 = "Other"
+					"</Entity>"
+		}
+	}
+
+	xml2js(queryStringHead + query + queryStringTail, function(err, result) {
+		console.log(result)
+	})
+	console.log("Request: " + queryStringHead + query + queryStringTail),
+	sendRequest(queryStringHead + query + queryStringTail, function(apiResponse) {
+		xml2js(apiResponse, function(err, result) {
+			var entities = getCreateEntities(result)
+
+			if (entities == undefined || entities.length == 0)
+			{
+				console.log("Result: " + JSON.stringify(result, null, 4))
+				callback("No response returned")
+			}
+			else
+			{
+				//console.log(j(result))
+				callback(result)
+			}
+			//callback(result)
+		})
+	}, "create")
+}
+
+// Uses the __ API field
+// Uses the TimeEntry API field
+// Required Fields:
+// DateWorked : Date
+// id : String?
+// ResourceID
+// RoleID
+// Type : pick from a list of options
+//
+// Non-required fields:
+// StartDateTime
+// EndDateTime
+// ContractID
+// SummaryNotes
+// TaskID
+function buildAddTravelTimeRequest(travelData, resourceID, callback)
+{
+	console.log("Adding travel times")
+	
+	buildResourceRoleQuery(resourceID, function(apiResponse) {
+		var entities = getEntities(apiResponse)
+		var resourceIDs = []
+		//console.log(apiTools.j(entities))
+		for (var i = 0; i < entities.length; i++)
+		{
+			resourceIDs.push(entities[i].RoleID[0]._)
+		}
+		buildRolesQuery(resourceIDs, function(apiResponse) {
+			var entities = getEntities(apiResponse)
+			var roleID = -1
+			for (var i = 0; i < entities.length; i++)
+			{
+				if (entities[i].Name[0]._.indexOf("Field") >= 0)  // The resource is a field technician
+				{
+					roleID = entities[i].id[0]
+					i = entities.length
+				}
+			}
+
+			if (roleID == -1)
+			{
+				callback("You are not a Field Technician!")
+			}
+			else
+			{
+				console.log("Going")
+				var queryStringHead = "<create xmlns='http://autotask.net/ATWS/v1_6/'><Entities>"
+				var queryStringTail = "</Entities></create>"
+				var query = ""
+				for (var i = 0; i < 1; i++)//travelData.length; i++)
+				{
+					var day = travelData[i]
+					for (var j = 0; j < 1; j++)//day.length; j++)
+					{
+						var trip = day[j]
+
+						var associatedAccount = trip.toAccountID
+						if (associatedAccount == -1)
+							associatedAccount = trip.fromAccountID
+						if (associatedAccount == -1)
+							continue
+
+						if (accountIDToAnnualProjectMap[associatedAccount])
+						{
+							travelData[i][j] = accountIDToAnnualProjectMap[associatedAccount]
+							trip.annualProjectID = travelData[i][j]
+							trip.taskID = annualProjectIDToTaskIDMap[trip.annualProjectID]
+						}
+
+
+						console.log(trip)
+
+						var associatedAccount = trip.toAccountID
+						if (associatedAccount == -1)
+							associatedAccount = trip.fromAccountID
+						if (associatedAccount == -1)
+							continue
+
+						var ticketDate = trip.arriveTime
+						if (ticketDate == -1)
+							ticketDate = ticket.leaveTime
+						if (ticketDate == -1)
+							continue
+
+						//console.log(ticketDate + " " + trip.arriveTime + " " + trip.leaveTime)
+						query +="<Entity xsi:type='TimeEntry' xmlns:xsi='http://www.w3.org/2001/XMLSchema-instance'>" +
+								"<DateWorked>" + new Date(ticketDate).toISOString() + "</DateWorked>" +
+								"<EndDateTime>" + new Date(trip.arriveTime).toISOString() + "</EndDateTime>" +
+								"<ResourceID>" + resourceID + "</ResourceID>" +
+								"<RoleID>" + roleID + "</RoleID>" + // Associated with the "Expense Type" field. 14 = "Other"
+								"<StartDateTime>" + trip.leaveTime + "</StartDateTime>" +
+								"<SummaryNotes>" + TRAVEL_DESCRIPTION + " " + trip.fromName + " to " + trip.toName + "</SummaryNotes>" +
+								"<TaskID>" + trip.taskID + "</TaskID>" +
+								"<Type>" + 12 + "</Type>" +  // 12 is TravelTime
+							"</Entity>"
+					}
+				}
+
+				console.log("timeRequest: " + queryStringHead + query + queryStringTail)
+
+				sendRequest(queryStringHead + query + queryStringTail, function(apiResponse) {
+					xml2js(apiResponse, function(err, result) {
+						var entities = getCreateEntities(result)
+						if (entities == undefined || entities.length == 0)
+						{
+							//console.log("Result: " + JSON.stringify(result, null, 4))
+							callback("No response returned")
+						}
+						else
+						{
+							//console.log(j(result))
+							callback(result)
+						}
+					})
+				}, "create", true)
+			}
+		})
+	})	
+}
+
+function getFieldInfo(entity, callback)
+{
+	var query = "<GetFieldInfo xmlns='http://autotask.net/ATWS/v1_6/'><psObjectType>" + entity +"</psObjectType></GetFieldInfo>"
+
+	//console.log(queryStringHead + query + queryStringTail)
+
+	sendRequest(query, function(apiResponse) {
+		callback(apiResponse)
+	}, "GetFieldInfo")
 }
 
 module.exports =
 {
-	// List of Supported request types:
-	REQ_temp : 1,    // User wants to find the client of the given name
-	REQ_ExpenseReport : 2,  // User wants to submit an expense report
-	REQ_TravelTime : 4,     // User wants to log travel time into a yearly project
-	REQ_Tickets : 8,         // Get ticket information for the previous week
+	buildAddExpenseItemsRequest: buildAddExpenseItemsRequest,
 
-	// Dispatches the proper request building function
-	buildAPIRequest : function(requestType, data, callback)
-	{
-		var responses = []
-		if ((requestType & REQ_Tickets) == REQ_Tickets)
-		{
-			console.log("Sending query for this weeks tickets '" + data)
-			var tickets = buildTicketsQueryRequest(data, callback)
-			var travelData = extrapolateTicketTravelData(tickets, callback) // TODO
+	buildAddTravelTimeRequest: buildAddTravelTimeRequest,
 
-			responses.push(tickets)
-		}
-		if ((requestType & REQ_ExpenseReport) == REQ_ExpenseReport)
-		{
-			console.log("Sending request to create new expense report")
-			responses.push(buildExpenseReportRequest(data, callback))
-		}
-		if ((requestType & REQ_TravelTime) == REQ_TravelTime)
-		{
-			console.log("Sending request to log new travel time")
-			responses.push(buildTravelTimeRequest(data, callback))
-		}
+	buildFindExpenseReportQuery : buildFindExpenseReportQuery,
 
-		console.log("Returned results:")
-		for (var i = 0; i < responses.length; i++)
-		{
-			console.log((i + 1) + "/" + responses.length)
-			console.log(responses[i])
-		}
-	},
-
-	/*
-	// Uses a binary search to find the client.
-	// If multiple clients are returned, it queries a larger amount of the string
-	// If no clients are returned it queries a smaller portion of the string
-	// If it cannot resolve to a client it will assume a typo in the name
-	// This is because of the nature of how we are parsing input
-	// For example if the user enters a client as "Fred Doug", obviously nothing will return, thus we try to match a smaller portion of the string
-	buildClientQueryRequest : function(client, max = client.toString().length, stepSize = max)
-	{
-		if (stepSize = 0) return undefined
-
-		var queryStringHead = "<queryxml><entity>Account</entity><query><field>AccountName<expression op='equals'>"
-		var queryStringTail = "</expression></field></query></queryxml>"
-
-		var cli = client.substr(0, max)
-		var returnedAccounts = sendRequest(queryStringHead + cli + queryStringTail)
-
-
-		stepSize = parseInt(stepSize / 2)
-		
-		if (returnedAccounts.length == 1) return returnedAccounts
-		else if (returnedAccounts > 1)
-		{
-			max += stepSize
-			if (max >= client.length) return undefined // Shouldn't ever happen
-
-			return buildClientQueryRequest(client, max, stepSize)
-		}
-		else if (returnedAccount == 0)
-		{
-			max -= stepSize
-			if (max >= client.length) return undefined // Shouldn't ever happen
-
-			return buildClientQueryRequest(client, max, stepSize)
-		}
-	},*/ // This function is vestigial
-	
-	// Uses the ExpenseItem API field
-	// Required fields as follows:
-	// BillableToAccount : bool
-	// Description : String
-	// ExpenseCategory : ?
-	// ExpenseDate : Date
-	// ExpenseReportId : ID of associated expense report
-	// HaveReceipt : Boolean
-	// ID : String? (ID of expense item)
-	//
-	// Non-Required fields as follows:
-	// Miles : Int
-	// OdometerStart
-	// OdometerEnd
-	buildAddExpenseReportRequest : function(reportObject, callback) // Note: Needs <create> tag surrounding the entity tag
-	{
-		var createString = ""
-
-		createString += makeParam("billableToAccount", "") + "\n"
-		createString += makeParam("description", "") + "\n"
-		createString += makeParam("expenseCategory", "") + "\n"
-		createString += makeParam("expenseDate", "") + "\n"
-		createString += makeParam("expenseReportID", "") + "\n"
-		createString += makeParam("haveReceipt", "") + "\n"
-		createString += makeParam("id", "") + "\n"
-
-		createString += makeParam("miles", "") + "\n"
-		createString += makeParam("odometerStart", "") + "\n"
-		createString += makeParam("odometerEnd", "") + "\n"
-
-		var expenseResponse = sendRequest(createString, callback)
-
-		//return expenseResponse
-	},
-	
-	// Uses the __ API field
-	// Uses the TimeEntry API field
-	// Required Fields:
-	// DateWorked : Date
-	// id : String?
-	// ResourceID
-	// RoleID
-	// Type : pick from a list of options
-	//
-	// Non-required fields:
-	// StartDateTime
-	// EndDateTime
-	// ContractID
-	// SummaryNotes
-	// TaskID
-	buildAddTravelTimeRequest : function(travelObject)
-	{
-		var createString = ""
-
-		createString += makeParam("dateWorked", "") + "\n"
-		createString += makeParam("id", "") + "\n"
-		createString += makeParam("resourceID", "") + "\n"
-		createString += makeParam("roleID", "") + "\n"
-		createString += makeParam("type", "") + "\n"
-
-		createString += makeParam("startDateTime", "") + "\n"
-		createString += makeParam("endDateTime", "") + "\n"
-		createString += makeParam("contractID", "") + "\n"
-		createString += makeParam("SummaryNotes", "Travel from x to x") + "\n"
-		createString += makeParam("taskID", "") + "\n"
-
-		var travelTimeResponse = sendRequest(createString, callback)
-
-		//return travelTimeResponse
-	},
+	buildCreateExpenseReportRequest : buildCreateExpenseReportRequest,
 
 	formatDate : formatDate,
 
 	buildTicketsQueryRequest : buildTicketsQueryRequest,
 
-	sendRequest : sendRequest
+	sendRequest : sendRequest,
+
+	buildResourceQueryRequest : buildResourceQueryRequest,
+	
+	buildContractIDsQueryRequest : buildContractIDsQueryRequest,
+
+	buildAccountIDsQueryRequest : buildAccountIDsQueryRequest,
+
+	getEntities : getEntities,
+
+	extrapolateTravelData : extrapolateTravelData,
+
+	sortTickets : sortTickets,
+
+	j : j,
+
+	travelDistanceMap : travelDistanceMap,
+
+	addressToAccountIDMap: addressToAccountIDMap,
+
+	findAddress : findAddress,
+
+	buildUploadDataRequest : buildUploadDataRequest,
+
+	getFieldInfo : getFieldInfo,
+
+	buildFindTravelProjectQuery : buildFindTravelProjectQuery,
+	
+	buildFindTravelProjectTaskQuery : buildFindTravelProjectTaskQuery,
+
+	buildRolesQuery : buildRolesQuery,
+	
+	buildResourceRoleQuery : buildResourceRoleQuery
 	
 }; // Closing bracket of module exports
