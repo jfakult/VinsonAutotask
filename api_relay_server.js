@@ -26,7 +26,7 @@ http.createServer(function (request, nodeResponse)
 	// Content Type: text/plain
    	nodeResponse.writeHead(200, {'Content-Type': 'text/plain'});
 
-	console.log("Starting new connection")
+	console.log("\nStarting new connection")
 
 	/*apiTools.buildFindTravelProjectQuery(426, function(apiResponse) {
 		apiTools.buildFindTravelProjectTaskQuery(apiResponse, function(apiResponse) {
@@ -84,6 +84,15 @@ http.createServer(function (request, nodeResponse)
 	})
 	return*/
 	
+	/*apiTools.getThresholdAndUsageInfo(function(apiResponse) { // Use this field to query picklist options
+		//console.log(apiResponse)
+		xml2js(apiResponse, function(err, result) {
+			nodeResponse.end(apiTools.j(result))
+		})
+		//nodeResponse.end(apiTools.j(apiResponse))
+	})
+	return*/
+	
 	var ticketData = apiTools.buildResourceQueryRequest("jfakult@vinsonedu.com", function(apiResponse) {
 		xml2js(apiResponse, function(err, result) {
 			if (result)
@@ -126,6 +135,10 @@ function loadResourceTickets(nodeResponse, resourceID)
 
 				//loadResourceTickets(nodeResponse, resourceID)
 			}
+			else
+			{
+				console.log("Error finding tickets: " + apiResponse)
+			}
 		})
 
 		//nodeResponse.write(apiResponse.toString())
@@ -147,26 +160,29 @@ function parseTicketsInformation(nodeResponse, tickets, requesterID)
 		var ticket = tickets[i]
 
 		if (ticket == undefined) continue
-		
+		if (ticket.Type[0]._  == "6")  // Ignore all Travel related time entries (really we probably only want to log tickets where type = 2)
+			continue
+
 		var ticketData = {}
 
 		ticketData.StartDateTime = ticket.StartDateTime[0]._
 		ticketData.EndDateTime = ticket.EndDateTime[0]._
 		ticketData.ContractID = ticket.ContractID[0]._
 
-		if (!ticketData.StartDateTime.endsWith("Z")) ticketData.StartDateTime += "Z" //Make sure date is parsed as EST
-		if (!ticketData.EndDateTime.endsWith("Z")) ticketData.EndDateTime += "Z"
-		
 		ticketsData.push(ticketData)
 	}
 
 	ticketsData = apiTools.sortTickets(ticketsData)
 
+	//console.log("Before: " + apiTools.j(ticketsData))
+
 	apiTools.buildContractIDsQueryRequest(ticketsData.map((val) => val.ContractID), function(accountIDs) {
 		apiTools.buildFindTravelProjectQuery(accountIDs, function(projectIDs) {
 			apiTools.buildFindTravelProjectTaskQuery(projectIDs, function(taskIDs) {
+				//console.log("After1: " + apiTools.j(ticketsData))
 				apiTools.buildAccountIDsQueryRequest(accountIDs, function(accountsData) {
 					apiTools.extrapolateTravelData(ticketsData, accountsData, function(travelData) {
+						//console.log("After2: " + apiTools.j(ticketsData))
 						//nodeResponse.end(JSON.stringify(ticketsData, null, 4) + "\n" + JSON.stringify(travelData, null, 4))
 						getDistanceData(travelData, nodeResponse, requesterID)
 					})
@@ -207,7 +223,7 @@ function loadCachedTravelData(travelData)
 				{
 					//console.log("Home map: " + apiTools.j(apiTools.travelDistanceMap["Home"]))
 					travelData[i][j].distance = apiTools.travelDistanceMap["Home"][trip.toAccountID][0]
-					travelData[i][j].leaveTime = new Date(new Date(trip.arriveTime) - (apiTools.travelDistanceMap["Home"][trip.toAccountID][1] * 3600 * 1000)).toISOString()
+					travelData[i][j].leaveTime = new Date(new Date(trip.arriveTime) - (apiTools.travelDistanceMap["Home"][trip.toAccountID][1] * 3600 * 1000)).toString()
 					//console.log("Time after: " + trip.leaveTime)
 					totalCached++
 				}
@@ -217,7 +233,7 @@ function loadCachedTravelData(travelData)
 				if (apiTools.travelDistanceMap[fromID] && apiTools.travelDistanceMap[fromID]["Home"])
 				{
 					travelData[i][j].distance = apiTools.travelDistanceMap[trip.fromAccountID]["Home"][0]
-					travelData[i][j].arriveTime = new Date(new Date(trip.leaveTime) + (apiTools.travelDistanceMap[trip.fromAccountID]["Home"][1] * 3600 * 1000)).toISOString()
+					travelData[i][j].arriveTime = new Date(new Date(trip.leaveTime).getTime() + (apiTools.travelDistanceMap[trip.fromAccountID]["Home"][1] * 3600 * 1000)).toString() // Had to be careful with adding dates
 					totalCached++
 				}
 			}
@@ -225,6 +241,7 @@ function loadCachedTravelData(travelData)
 			{
 				//console.log("Don't know: " + apiTools.j(trip))
 			}
+			travelData[i][j].totalTimeHours = apiTools.roundToNearest15(travelData[i][j].leaveTime, travelData[i][j].arriveTime)
 		}
 	}
 
@@ -376,7 +393,7 @@ function parseDistanceMatrix(matrix, addresses, callback)
 function uploadTravelData(travelData, nodeResponse, requesterID)
 {
 	apiTools.buildUploadDataRequest(travelData, requesterID, function(response) {
-		nodeResponse.end(apiTools.j(response))
+		nodeResponse.end(response)
 	})
 }
 
