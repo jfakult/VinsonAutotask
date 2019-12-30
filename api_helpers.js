@@ -20,11 +20,16 @@ var xml2js = require("xml2js").parseString
 var EXPENSE_TITLE = "Gas Expenses" // name of the expense report. The month will be added (e.g EXPENSE_TITLE="Gas" will create the report: "Gas for August 2019")
 var TRAVEL_DESCRIPTION = "Travel from" // Same as above
 
+var emailToResourceIDMap = {}
 var contractIDToAccountIDMap = {}
 var travelDistanceMap = {}
 var addressToAccountIDMap = {}
 var accountIDToAnnualProjectMap = {}
 var annualProjectIDToTaskIDMap = {}
+
+var accountInformation = {}
+//var travelDistanceData = {}
+var imperialOrMetric = "imperial"
 
 var cachedTimeEntryHashes = {}   // This should probably be saved in a database but this is fine for now...
 var cachedExpenseItemHashes = {} // Just don't restart the server more often that monthly...
@@ -106,29 +111,66 @@ function formatDate(dateValue)
 	return currentYear + '-' + current_month + '-' + current_date + 'T' + current_hrs + ':' + current_mins + ':' + current_secs
 }
 
-function buildTicketsQueryRequest(resourceID, callback) // Queries for a list of all tickets since "last monday"
+function buildTicketsQueryRequest(resourceID, generatingTravelTimes, callback) // Queries for a list of all tickets since "last monday"
 {
 	var lastMonday = new Date()
 	lastMonday.setHours(0)
 	lastMonday.setMinutes(0)
 
-	lastMonday.setDate(lastMonday.getDate() - ((lastMonday.getDay() + 6) % 7)) // Sets date to last Monday. Don't ask me for a mathematical proof
+	if (generatingTravelTimes)
+	{
+		lastMonday.setDate(lastMonday.getDate() - ((lastMonday.getDay() + 6) % 7)) // Sets date to last Monday. Don't ask me for a mathematical proof
+	}
+	else
+	{
+		lastMonday.setDate(1)
+	}
 
 	var queryStringHead = "<query xmlns='http://autotask.net/ATWS/v1_6/'><sXML><![CDATA[<queryxml><entity>TimeEntry</entity><query><field>StartDateTime"
 	var queryBody = "<expression op='greaterthan'>" + formatDate(lastMonday) + "</expression>"
 	queryBody += "</field><field>ResourceID<expression op='equals'>" + resourceID + "</expression>"
 	var queryStringTail = "</field></query></queryxml>]]></sXML></query>"
 
-	//console.log("Ticket query: " + queryBody)
-	sendRequest(queryStringHead + queryBody + queryStringTail, callback)
+	sendRequest(queryStringHead + queryBody + queryStringTail, function(apiResponse) {
+		xml2js(apiResponse, function(err, result) {
+			if (result)
+			{
+				var tickets = getEntities(result)
+				
+				callback(tickets)
+			}
+			else
+			{
+				addReturnLog("error", "No tickets were found for resource: " + resourceID)
+				callback(undefined)
+			}
+		})
+	})
 }
 
 function buildResourceQueryRequest(resourceEmail, callback)
 {
+	if (emailToResourceIDMap[resourceEmail] != undefined)
+		callback(emailToResourceIDMap[resourceEmail])
+
 	var queryStringHead = "<query xmlns='http://autotask.net/ATWS/v1_6/'><sXML><![CDATA[<queryxml><entity>Resource</entity><query><field>Email"
 	var queryBody = "<expression op='equals'>" + resourceEmail + "</expression>"
 	var queryStringTail = "</field></query></queryxml>]]></sXML></query>"
-	var temp = sendRequest(queryStringHead + queryBody + queryStringTail, callback)
+
+	sendRequest(queryStringHead + queryBody + queryStringTail, function(apiResponse) {
+		xml2js(apiResponse, function(err, result) {
+			var resources = getEntities(result)
+			if (resources.length > 0)
+			{
+				callback(resources[0].id[0])
+			}
+			else
+			{
+				addReturnLog("error", "No resources found that match the email: " + resourceEmail)
+				callback(undefined)
+			}
+		})
+	})
 }
 
 // Note: Since this function makes all calls asynchronously, the account IDs may come back out of order. Use the map to ensure you have the correct account when referencing
@@ -147,7 +189,6 @@ function buildContractIDsQueryRequest(contractIDs, callback)
 		if (contractIDToAccountIDMap[contractID] != undefined) // Check to see if we have already seen this contractID
 		{
 			accountIDs.push(contractIDToAccountIDMap[contractID])
-			//return
 			continue
 		}
 
@@ -169,9 +210,14 @@ function buildContractIDsQueryRequest(contractIDs, callback)
 
 					accountIDs.push(accountID)
 				}
-			}
 
-			callback(accountIDs)
+				callback(accountIDs)
+			}
+			else
+			{
+				addReturnLog("error", "No accounts returned from list of contracts: " + j(contractIDs))
+				callback(undefined)
+			}
 		})
 	})
 }
@@ -190,15 +236,19 @@ function buildAccountIDsQueryRequest(accountIDs, callback)
 	var queries = ""
 	for (var i = 0; i < accountIDs.length; i++)
 	{
-			
-		var accountID = accountIDs[i]
-
 		queries += "<expression op='equals'>" + accountIDs[i] + "</expression>"
 	}
 
 	sendRequest(queryStringHead + queries + queryStringTail, function(apiResponse) {
 		xml2js(apiResponse, function(err, result) {
 			var accounts = getEntities(result)
+
+			if (accounts == undefined || accounts.length == 0)
+			{
+				addReturnLog("error", "No accounts found with IDs: " + j(accountIDs))
+				callback(undefined)
+				return
+			}
 
 			for (var i = 0; i < accounts.length; i++)
 			{
@@ -215,7 +265,6 @@ function buildAccountIDsQueryRequest(accountIDs, callback)
 				accountsData[accounts[i].id[0]] = accountData
 			}
 
-
 			callback(accountsData)
 		})
 	})
@@ -223,28 +272,13 @@ function buildAccountIDsQueryRequest(accountIDs, callback)
 }
 function sendRequest(soapXML, callback, action = "query", log = false)
 {
-	console.log("Sending: " + action + "...")
-	//console.log(soapXML)
-	//if (soapXML.indexOf("29684145") >= 0) return undefined
-	/*soap.createClient(url, function(err, client)
-	{
-		client.setSecurity(new soap.BasicAuthSecurity(privateData.API_PASSWORD, privateData.API_USERNAME)));
-		client.MyFunction(args, function(err, result)
-		{
-			console.log(result);
-		});
-
-	});*/
-
 	soapXML = requestHeader + soapXML + requestTail
-
-	//callback(soapXML)
 
 	SOAP_OPTIONS = {
 		host: "webservices3.autotask.net",
 		port: 443,
 		method: "POST",
-		path: "/atservices/1.6/atws.asmx", // To use version 1.6 change to /atservices/1.6/atws.asmx
+		path: "/atservices/1.6/atws.asmx",
 		// authentication headers
 		headers: {
 		    'Content-Type': "text/xml; charset=utf-8",
@@ -277,7 +311,7 @@ function sendRequest(soapXML, callback, action = "query", log = false)
 	});
 
 	request.on("error", (e) => {
-	    console.error("error: " + e);
+	    console.error("error sending request: " + e);
 	});
 
 	//console.log(soapXML)
@@ -287,11 +321,8 @@ function sendRequest(soapXML, callback, action = "query", log = false)
 
 function getEntities(xmlObject)
 {
-	//console.log("---" + JSON.stringify(xmlObject["soap:Envelope"]["soap:Body"][0].queryResponse[0].queryResult[0].EntityResults[0].Entity) + "\n\n")
-
 	try
 	{
-		//console.log(xmlObject["soap:Envelope"]["soap:Body"][0].queryResponse[0].queryResult[0].EntityResults[0])
 		return xmlObject["soap:Envelope"]["soap:Body"][0].queryResponse[0].queryResult[0].EntityResults[0].Entity
 	}
 	catch (e) { return undefined }
@@ -299,8 +330,6 @@ function getEntities(xmlObject)
 
 function getCreateEntities(xmlObject)
 {
-	//console.log("---" + JSON.stringify(xmlObject["soap:Envelope"]["soap:Body"][0].queryResponse[0].queryResult[0].EntityResults[0].Entity) + "\n\n")
-
 	try
 	{
 		return xmlObject["soap:Envelope"]["soap:Body"][0].createResponse[0].createResult[0].EntityResults[0].Entity
@@ -317,6 +346,7 @@ function hashTrip(trip)
 	orderedValues.push(trip.arriveTime)
 	orderedValues.push(trip.fromAccountID)
 	orderedValues.push(trip.toAccountID)
+	// TODO: Add resourceID here
 
 	return JSON.stringify(orderedValues)
 }
@@ -335,6 +365,7 @@ function roundToNearest15(startTime, endTime, inc = 4) // Round the hour into "i
 	return roundedHours
 }
 
+// TODO
 var homeAddress = "29156 Chardon rd Willoughby Hills, Ohio"
 function extrapolateTravelData(ticketsData, accountsData, callback)
 {
@@ -348,9 +379,15 @@ function extrapolateTravelData(ticketsData, accountsData, callback)
 	var lastAccountID = -1
 	var currentDay = undefined
 
-	if (ticketsData.length > 0) // Initialize the day. We want to seperate travel time by which day it occured
+	if (ticketsData.length > 0) // Initialize the day. We want to seperate travel time by which day it occurred
 	{
 		currentDay = new Date(ticketsData[0].StartDateTime).getDate()
+	}
+	else
+	{
+		addReturnLog("error", "No recent tickets have been found for you!")
+		callback(undefined)
+		return
 	}
 
 	//log("Map", j(contractIDToAccountIDMap))
@@ -491,26 +528,26 @@ function longestCommonSubstring(a, b)
 // Given an address and an array of addresses, return the one with the longest matching substring
 function findAddress(address, addresses)
 {
-	address = address.replaceAll(",", "")
+	address = address.toLowerCase()
+	address = address.replaceAll(",", "").replaceAll("street", "st").replaceAll("road", "rd").replaceAll("avenue", "ave")
 	//console.log("Checking: " + address)
 	var longestSubstringIndex = 0
 	var longestSubstring = ""
 
 	for (var i = 0; i < addresses.length; i++)
 	{
-		var a = addresses[i]
-		a = a.replaceAll(",", "")
+		var a = addresses[i].toLowerCase()
+		a = a.replaceAll(",", "").replaceAll("street", "st").replaceAll("road", "rd").replaceAll("avenue", "ave")
 
 		//console.log("Comparing: " + a)
 
-		var substring = longestCommonSubstring(a.toLowerCase(), address.toLowerCase())
+		var substring = longestCommonSubstring(a, address)
 
 		//console.log("subString: " + substring)
 
 		if (substring.length > longestSubstring.length)
 		{
 			longestSubstring = substring
-			//console.log("Found new longest: " + substring.length)
 			longestSubstringIndex = i
 		}
 	}
@@ -520,69 +557,103 @@ function findAddress(address, addresses)
 	return [address, addresses[longestSubstringIndex]]
 }
 
+// Split this up into a function for expenses and travel times 
 var months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" ]
+
+// Still needs error reporting
 function buildUploadDataRequest(travelData, requesterID, callback)
 {
-	buildAddTravelTimeRequest(travelData, requesterID, function(apiResponse)
+	if (travelData.length == 0 || travelData[0].length == 0)
 	{
-		console.log("Success or failed adding travel time")
+		addReturnLog("error", "No travel data was found")
+		callback(undefined)
+		return
+	}
 
+	var firstTrip = travelData[0][0]
+	var lastTrip = travelData[travelData.length - 1][travelData.slice(-1)[0].length -1] // Javascript magic
 
-		var firstTrip = travelData[0][0]                       // There should have been an "empty check" by now
-		var lastTrip = travelData[travelData.length - 1][travelData.slice(-1)[0].length -1] // Javascript magic
+	//console.log("Trip dates: " + j(travelData[0][0]))
+	var startMonth = months[ (new Date(firstTrip.arriveTime)).getMonth() ]  //arrive because it is the first non-home trip of the month
+	var endMonth = months[ (new Date(lastTrip.leaveTime)).getMonth() ]	//leave for same reason as above
 
-		//console.log("Trip dates: " + j(travelData[0][0]))
+	var startYear = (new Date(firstTrip.arriveTime)).getFullYear()
+	var endYear = (new Date(lastTrip.leaveTime)).getFullYear()
+	var splitIndex = months[startMonth]
 
-		var startMonth = months[ (new Date(firstTrip.arriveTime)).getMonth() ]  //arrive because it is the first non-home trip of the month
-		var endMonth = months[ (new Date(lastTrip.leaveTime)).getMonth() ]	//leave for same reason as above
+	// If the week crossed through the month, we need to create expense reports for both months
+	// Thus, this for loop iterates over the travelData to find which day of the week starts the new month
+	if (startMonth != endMonth)
+	{
+		for (var i = 0; i < travelData.length; i++)
+		{
+			var day = travelData[i]
+			if (day == undefined || day.length == 0)
+				continue
 
-		
-		var startYear = (new Date(firstTrip.arriveTime)).getFullYear()
-		var endYear = (new Date(lastTrip.leaveTime)).getFullYear()
+			if (splitIndex != months[new Date(day[0].arriveTime).getMonth()])
+			{
+				splitIndex = i  // Change the data type of the index from a month name to an index value then exit the for loop
+				break
+			}
+		}
+	}
 
-		var startDesiredName = EXPENSE_TITLE + " for " + startMonth + " " + startYear
-		var endDesiredName = EXPENSE_TITLE + " for " + endMonth + " " + endYear
+	var startDesiredName = EXPENSE_TITLE + " for " + startMonth + " " + startYear
+	var endDesiredName = EXPENSE_TITLE + " for " + endMonth + " " + endYear
 
-		buildFindExpenseReportQuery(startDesiredName, function(startExpenseReportID) {   // Technically this may cause issues for the edge case
-			if (startExpenseReportID == -1)					      // Where the user creates expense reports for the entire year
-			{								      // AND calls them by the exact same name as this program wants to call them
-				buildCreateExpenseReportRequest(startDesiredName, firstTrip.arriveTime, requesterID, function(newStartExpenseReportID) {
-					//console.log("New report: " + j(newStartExpenseReportID))
-					if (startMonth != endMonth)
-					{
-						buildCreateExpenseReportRequest(endDesiredName, lastTrip.leaveTime, requesterID, function(endExpenseReportID) {
-							// Upload data
-							//callback(newStartExpenseReportID + " " + endExpenseReportID)
-							buildAddExpenseItemsRequest(travelData, newStartExpenseReportID, function(apiResponse) {
+	buildFindExpenseReportQuery(startDesiredName, function(startExpenseReportID) {   // Technically this may cause issues for the edge case
+		if (startExpenseReportID == -1)					         // Where the user creates expense reports for the entire year
+		{								         // AND calls them by the exact same name as this program wants to call them
+			buildCreateExpenseReportRequest(startDesiredName, firstTrip.arriveTime, requesterID, function(newStartExpenseReportID) {
+				if (startMonth != endMonth)
+				{
+					buildCreateExpenseReportRequest(endDesiredName, lastTrip.leaveTime, requesterID, function(endExpenseReportID) {
+						
+						buildAddExpenseItemsRequest(travelData.slice(0, splitIndex), newStartExpenseReportID, function(apiResponse) {
+						
+							buildAddExpenseItemsRequest(travelData.slice(splitIndex), endExpenseReportID, function(apiResponse)  {
+							
 								callback(apiResponse)
+
 							})
 						})
-					}
-					else
-					{
-						buildAddExpenseItemsRequest(travelData, newStartExpenseReportID, function(apiResponse) {
-							callback(apiResponse)
-						})
-					}
-				})
-			}
-			else if (startMonth != endMonth) // Split tickets into two sections
-			{
-				buildCreateExpenseReport(endDesiredName, lastTrip.leaveTime, requesterID, function(endExpenseReportID) {
-					// Upload data
+					})
+				}
+				else
+				{
 					buildAddExpenseItemsRequest(travelData, newStartExpenseReportID, function(apiResponse) {
+
 						callback(apiResponse)
+
+					})
+				}
+			})
+		}
+		else if (startMonth != endMonth) // Split tickets into two sections
+		{
+			buildFindExpenseReportQuery(endDesiredName, function(endExpenseReportID) {
+
+				buildCreateExpenseReport(endDesiredName, lastTrip.leaveTime, requesterID, function(endExpenseReportID) {
+
+					buildAddExpenseItemsRequest(travelData.slice(0, splitIndex), newStartExpenseReportID, function(apiResponse) {
+
+						buildAddExpenseItemsRequest(travelData.slice(splitIndex), endExpenseReportID, function(apiResponse)  {
+
+							callback(apiResponse)
+
+						})
 					})
 				})
-			}
-			else
-			{
-				buildAddExpenseItemsRequest(travelData, startExpenseReportID, function(apiResponse) {
-					//console.log(j(apiResponse))
-					callback(apiResponse)
-				})
-			}
-		})
+			})
+		}
+		else
+		{
+			buildAddExpenseItemsRequest(travelData, startExpenseReportID, function(apiResponse) {
+				//console.log(j(apiResponse))
+				callback(apiResponse)
+			})
+		}
 	})
 }
 
@@ -607,8 +678,8 @@ function buildFindTravelProjectTaskQuery(projectIDs, callback)
 			var projects = getEntities(result)
 			if (projects == undefined || projects.length == 0)
 			{
-				console.log("No project tasks found: " + apiResponse)
-				callback([])
+				addReturnLog("error", "No tasks found for annual projects with IDs: " + j(projectIDs))
+				callback(undefined)
 			}
 			else
 			{
@@ -664,8 +735,8 @@ function buildFindTravelProjectQuery(accountIDs, callback)
 			var projects = getEntities(result)
 			if (projects == undefined || projects.length == 0)
 			{
-				console.log("No expense reports found (creating a new one): " + apiResponse)
-				callback([])
+				addReturnLog("error", "No annual projects were found to be associated with any accounts")
+				callback(undefined)
 			}
 			else
 			{
@@ -704,15 +775,15 @@ function buildRolesQuery(resourceIDs, callback)
 			var reports = getEntities(result)
 			if (reports == undefined || reports.length == 0)
 			{
-				console.log("No expense reports found (creating a new one): " + apiResponse)
-				callback(-1)
+				addReturnLog("warning", "No roles found for resources: " + j(resourceIDs) + " (this means these people likely aren't field technicians)")
+				callback([])
 			}
 			else
 			{
 				//console.log(j(reports))
-				//reportID = reports[0].id[0]
+				reportID = reports[0].id[0]
 
-				callback(result)
+				callback(reportID)
 			}
 		})
 	})
@@ -733,15 +804,12 @@ function buildResourceRoleQuery(resourceID, callback)
 			var reports = getEntities(result)
 			if (reports == undefined || reports.length == 0)
 			{
-				console.log("No expense ResourceRoles found : " + apiResponse)
-				callback(-1)
+				addReturnLog("error", "No ResourceRoles associated with resource: " + resourceID + " (This means you are not a field technician)")
+				callback(undefined)
 			}
 			else
 			{
-				//console.log(j(reports))
-				//reportID = reports[0].id[0]
-
-				callback(result)
+				callback(reports)
 			}
 		})
 	})
@@ -755,7 +823,6 @@ function buildFindExpenseReportQuery(desiredName, callback)
 	var queryStringHead = "<query xmlns='http://autotask.net/ATWS/v1_6/'><sXML><![CDATA[<queryxml><entity>ExpenseReport</entity><query><field>name"
 	var queryStringTail = "</field></query></queryxml>]]></sXML></query>"
 
-	console.log("Desired expense report: " + desiredName)
 	var query = "<expression op='equals'>" + desiredName + "</expression>"
 
 	sendRequest(queryStringHead + query + queryStringTail, function(apiResponse) {
@@ -763,12 +830,11 @@ function buildFindExpenseReportQuery(desiredName, callback)
 			var reports = getEntities(result)
 			if (reports == undefined || reports.length == 0)
 			{
-				console.log("No expense reports found (creating a new one): ")
+				addReturnLog("warning", "No expense reports found found for this month (creating a new one)")
 				callback(-1)
 			}
 			else
 			{
-				//console.log(j(reports))
 				reportID = reports[0].id[0]
 
 				callback(reportID)
@@ -796,20 +862,20 @@ function buildCreateExpenseReportRequest(desiredName, ticketDate, requesterID, c
 			"<WeekEnding>" + formatDate(monthEndDate) + "</WeekEnding>"  +
 			"</Entity>"
 
-	//console.log(queryStringHead + query + queryStringTail)
-
 	sendRequest(queryStringHead + query + queryStringTail, function(apiResponse) {
 		xml2js(apiResponse, function(err, result) {
-			var entities = getCreateEntities(result)
+			var expenseReports = getCreateEntities(result)
 
-			if (!entities || entities.length == 0)
+
+			if (expenseReports == undefined || expenseReports.length == 0)
 			{
-				console.log("No expense report was created: " + apiResponse)
+				addReturnLog("error", "Failed to create new expense report.\nResponse:\n" + j(result))
 				callback(undefined)
 			}
 			else
 			{
-				callback(parseInt(entities[0].id[0]))
+				addReturnLog("success", "Successfully created expense report")
+				callback(true)
 			}
 			//callback(result)
 		})
@@ -835,10 +901,10 @@ function buildAddExpenseItemsRequest(travelData, expenseReportID, callback) // N
 	var queryStringHead = "<create xmlns='http://autotask.net/ATWS/v1_6/'><Entities>"
 	var queryStringTail = "</Entities></create>"
 	var query = ""
-	for (var i = 0; i < 0; i++)//travelData.length; i++)
+	for (var i = 0; i < travelData.length; i++)
 	{
 		var day = travelData[i]
-		for (var j = 0; j < 1; j++) //day.length; j++)
+		for (var j = 0; j < day.length; j++)
 		{
 			var trip = day[j]
 
@@ -887,17 +953,18 @@ function buildAddExpenseItemsRequest(travelData, expenseReportID, callback) // N
 	//console.log("Request: " + queryStringHead + query + queryStringTail),
 	sendRequest(queryStringHead + query + queryStringTail, function(apiResponse) {
 		xml2js(apiResponse, function(err, result) {
-			var entities = getCreateEntities(result)
+			var expenseItems = getCreateEntities(result)
 
-			if (entities == undefined || entities.length == 0) // This would happen if all expenses were logged
+			if (expenseItems == undefined || expenseItems.length == 0) // This would happen if all expenses were logged
 			{
-				console.log("Did not create any expenses: ")// + JSON.stringify(result, null, 4))
-				callback("No changes made")
+				addReturnLog("error", "Failed to create new expense items. Response:\n" + JSON.stringify(result))
+				callback(undefined)
 			}
 			else
 			{
 				//console.log(j(result))
-				callback("Finished uploading!")
+				addReturnLog("success", "Created expense items")
+				callback("true")
 			}
 			//callback(result)
 		})
@@ -921,16 +988,15 @@ function buildAddExpenseItemsRequest(travelData, expenseReportID, callback) // N
 // TaskID
 function buildAddTravelTimeRequest(travelData, resourceID, callback)
 {
-	console.log("Adding travel times")
-	
 	buildResourceRoleQuery(resourceID, function(apiResponse) {
 		var entities = getEntities(apiResponse)
 		var resourceIDs = []
-		//console.log(apiTools.j(entities))
+		//console.log(j(entities))
 		for (var i = 0; i < entities.length; i++)
 		{
 			resourceIDs.push(entities[i].RoleID[0]._)
 		}
+		// TODO: Move to server.js
 		buildRolesQuery(resourceIDs, function(apiResponse) {
 			var entities = getEntities(apiResponse)
 			var roleID = -1
@@ -952,11 +1018,9 @@ function buildAddTravelTimeRequest(travelData, resourceID, callback)
 				var queryStringHead = "<create xmlns='http://autotask.net/ATWS/v1_6/'><Entities>"
 				var queryStringTail = "</Entities></create>"
 				var query = ""
-				log("Days", travelData.length)
 				for (var i = 0; i < travelData.length; i++)
 				{
 					var day = travelData[i]
-					log("Day stops", day.length)
 					for (var j = 0; j < day.length; j++)
 					{
 						var trip = day[j]
@@ -1058,21 +1122,18 @@ function buildAddTravelTimeRequest(travelData, resourceID, callback)
 				//log("Query", query.replaceAll("<", "\n") + "\n")
 				//console.log("timeRequest: " + queryStringHead + query + queryStringTail)
 				
-				//return
-
 				sendRequest(queryStringHead + query + queryStringTail, function(apiResponse) {
 					xml2js(apiResponse, function(err, result) {
-						var entities = getCreateEntities(result)
-						if (entities == undefined || entities.length == 0)
+						var timeEntries = getCreateEntities(result)
+						if (timeEntries == undefined || timeEntries.length == 0)
 						{
-							log("No timeEntries", "returned")
-							//console.log("Result: " + JSON.stringify(result, null, 4))
-							callback("No response returned")
+							addReturnLog("error", "No travel time entries create. Response:\n" + result)
+							callback(undefined)
 						}
 						else
 						{
 							//console.log(j(result))
-							callback(result)
+							callback(true)
 						}
 					})
 				}, "create")
@@ -1104,9 +1165,352 @@ function getThresholdAndUsageInfo(callback)
 	}, "getThresholdAndUsageInfo", true) // Case sensitive
 }
 
+var returnMessage = [] 
+function addReturnLog(messageStatus, message)
+{
+	returnMessage.push({"status": messageStatus, "message": message})
+}
+
+//Note: These values are actually TimeEntries from the API, not technically tickets. Just easier to understand this way I think
+function parseTicketsInformation(tickets, callback)
+{
+	if (tickets == undefined || tickets.length == 0)
+	{
+		addReturnLog("error", "No tickets were returned")
+		callback(undefined)
+	}
+
+	var ticketsData = []
+	for (var i = 0; i < tickets.length; i++)
+	{
+		var ticket = tickets[i]
+
+		if (ticket == undefined) continue
+		if (ticket.Type[0]._  == "6")  // Ignore all Travel related time entries (really we probably only want to log tickets where type = 2)
+			continue
+
+		var ticketData = {}
+
+		ticketData.StartDateTime = ticket.StartDateTime[0]._
+		ticketData.EndDateTime = ticket.EndDateTime[0]._
+		ticketData.ContractID = ticket.ContractID[0]._
+
+		ticketsData.push(ticketData)
+	}
+
+	ticketsData = sortTickets(ticketsData)
+
+	//console.log("Before: " + j(ticketsData))
+
+	//var contractIDs = ticketsData.map((val) => val.ContractID)
+	//callback(contractIDs) 
+	callback(ticketsData)
+
+}
+
+// Inputs distances that are already cached. returns a tuple of [the number of entries that were not found in the cache, updated travel data]
+function loadCachedTravelData(travelData)
+{
+	//console.log("TravelMap: " + j(travelDistanceMap))
+	var totalDrives = 0
+	var totalCached = 0
+	for (var i = 0; i < travelData.length; i++) // Iterate over every days data
+	{
+		var dayData = travelData[i]
+		for (var j = 0; j < dayData.length; j++) // Iterate over the data for the day
+		{
+			totalDrives++
+			var trip = dayData[j]
+			var fromID = trip.fromAccountID
+			var toID = trip.toAccountID
+
+			//log("Travel data", trip.fromName + " " + trip.toName + " " +0
+			if (travelDistanceMap[fromID] && travelDistanceMap[fromID][toID]) // if we have this data cached
+			{
+				travelData[i][j].distance = travelDistanceMap[trip.fromAccountID][trip.toAccountID][0]
+				totalCached++
+			}
+			else if (fromID == -1) // came from home
+			{
+				//console.log("Trip: " + j(trip))
+				if (travelDistanceMap["Home"] && travelDistanceMap["Home"][toID])
+				{
+					//console.log("Home map: " + j(travelDistanceMap["Home"]))
+					travelData[i][j].distance = travelDistanceMap["Home"][trip.toAccountID][0]
+					travelData[i][j].leaveTime = new Date(new Date(trip.arriveTime) - (travelDistanceMap["Home"][trip.toAccountID][1] * 3600 * 1000)).toString()
+					//console.log("Time after: " + trip.leaveTime)
+					totalCached++
+				}
+			}
+			else if (toID == -1)
+			{
+				if (travelDistanceMap[fromID] && travelDistanceMap[fromID]["Home"])
+				{
+					travelData[i][j].distance = travelDistanceMap[trip.fromAccountID]["Home"][0]
+					travelData[i][j].arriveTime = new Date(new Date(trip.leaveTime).getTime() + (travelDistanceMap[trip.fromAccountID]["Home"][1] * 3600 * 1000)).toString() // Had to be careful with adding dates
+					totalCached++
+				}
+			}
+			else
+			{
+				//console.log("Don't know: " + trip.fromName + " == " + trip.toName)
+			}
+			travelData[i][j].totalTimeHours = roundToNearest15(travelData[i][j].leaveTime, travelData[i][j].arriveTime)
+		}
+	}
+
+	return [totalDrives - totalCached, travelData]
+}
+
+Set.prototype.toArray = function()
+{
+	var arr = []
+	var iter = this.values()
+	var val = iter.next()
+	while (!val.done)
+	{
+		arr.push(val.value)
+		val = iter.next()
+	}
+
+	return arr
+}
+
+var MAX_MATRIX_ELEMENTS = 100
+// Recurses one time in order to 
+function getDistanceData(travelData, nodeResponse, requesterID, callback, recursing = false, originParamsOffset = 0)
+{
+	var cacheData = loadCachedTravelData(travelData)
+
+	//log("Cache data", cacheData[1].length)
+	var uncachedTrips = cacheData[0]
+	//log("UncachedTrips", uncachedTrips + "\n\n")
+	travelData = cacheData[1]
+
+	// Recursive base case
+	if (uncachedTrips == 0)
+	{
+		//nodeResponse.end(j(travelData))
+
+		callback(travelData)
+		return
+	}
+
+	if (recursing)
+	{
+		addReturnLog("Error", "Google maps was unable to find an address for a school")
+		callback(undefined)
+		return
+	}
+
+	var apiURL = "https://maps.googleapis.com/maps/api/distancematrix/json?"
+
+	var originParams = new Set()
+	var destParams = new Set()
+
+	for (var i = 0; i < travelData.length; i++) // Iterate over every days data
+	{
+		var dayData = travelData[i]
+		for (var j = 0; j < dayData.length; j++) // Iterate over the data for the day
+		{
+			var trip = dayData[j]
+			var fromID = trip.fromAccountID
+			var toID = trip.toAccountID
+
+			//log("Finding addresses for trip", trip.fromName + " " + trip.toName + " " + trip.fromAddress + " " + trip.toAddress)
+			if (travelDistanceMap[fromID] && travelDistanceMap[fromID][toID]) // if we have this data cached
+			{
+				continue
+			}
+			else
+			{
+				originParams.add(trip.fromAddress)
+				destParams.add(trip.toAddress)
+			}
+		}
+	}
+
+	originParams = originParams.toArray()
+	destParams = destParams.toArray()
+	var matrixSize = originParams.length * destParams.length
+	//log("Matrix size", matrixSize + " " + originParams.length + " " + destParams.length)
+	var originChunkSize = 0
+	if (matrixSize >= MAX_MATRIX_ELEMENTS)
+	{
+		originChunkSize = parseInt(100 / destParams.length)
+		originParams = originParams.slice(originParamsOffset, originParamsOffset + originChunkSize)
+	}
+
+	//log("Origin before", JSON.stringify(originParams))
+	var addresses = originParams.concat(destParams)
+
+	//log("Origin after", JSON.stringify(originParams))
+	var requestURL = apiURL + "origins="+ originParams.join("|") + "&units=" + imperialOrMetric + "&destinations=" + destParams.join("|" )+ "&key=" + config.MAPS_API_KEY
+
+	//console.log(requestURL)
+	https.get(requestURL, (resp) => {
+  		let data = '';
+
+		// A chunk of data has been recieved.
+		resp.on('data', (chunk) => {
+			data += chunk;
+		});
+
+		// The whole response has been received. Print out the result.
+		resp.on('end', () => {
+			//log("Data", data)
+			parseDistanceMatrix(data, addresses, function() {
+				if (matrixSize >= MAX_MATRIX_ELEMENTS)
+					getDistanceData(travelData, nodeResponse, requesterID, callback, false, originParamsOffset + originChunkSize)
+				else
+					getDistanceData(travelData, nodeResponse, requesterID, callback, true)
+
+			})
+		})
+
+		resp.on("error", (err) => {
+			console.log("Error: " + err.message);
+		})
+	})
+}
+
+function parseDistanceMatrix(matrix, addresses, callback)
+{
+	//console.log(j(addressToAccountIDMap))
+	data = JSON.parse(matrix)
+	//console.log("Data: " + matrix)
+
+	//console.log(matrix)
+
+	var destinations = data.destination_addresses
+	var origins = data.origin_addresses
+	var distances = data.rows
+
+	for (var o = 0; o < origins.length; o++)
+	{
+		var elements = distances[o].elements
+		var origin = origins[o]
+		//log("From", origin)
+		for (var d = 0; d < destinations.length; d++)
+		{
+			var values = elements[d]
+			var distanceMiles = Math.ceil(values.distance.value / 1608) // Convert meters to miles and round up
+			var timeHours = Math.ceil((values.duration.value / 3600) * 4) / 4  // Convert seconds to hours and round up to the nearest 15
+
+			//Not used currently
+			var estimatedTime = values.duration.value / 3600.0 // convert seconds to hours
+			estimatedTime = Math.ceil(estimatedTime * 4) / 4 // Round up to the nearest quarter hour
+
+			var dest = destinations[d]
+			var fromAddressConversion = findAddress(origin, addresses)    // Has to compare the Autotask addresses with the returned Google Maps addresses
+			var toAddressConversion = findAddress(dest, addresses)    // Basically just finds the address with the longest matching substring
+
+			var fromID = addressToAccountIDMap[fromAddressConversion[1]]
+			var toID = addressToAccountIDMap[toAddressConversion[1]]
+
+			if (fromID == undefined) fromID = "Home"
+			if (toID == undefined) toID = "Home"
+
+			//log("To", dest)
+
+			if (travelDistanceMap[fromID] && travelDistanceMap[fromID][toID]) // if we have this data cached
+				continue
+
+			if (!travelDistanceMap[fromID])
+				travelDistanceMap[fromID] = {}
+			if (!travelDistanceMap[toID])
+				travelDistanceMap[toID] = {}
+
+			//log("Caching from", fromAddressConversion)
+			//log("Caching to  ", toAddressConversion)
+
+			travelDistanceMap[fromID][toID] = [distanceMiles, timeHours]
+			travelDistanceMap[toID][fromID] = [distanceMiles, timeHours]
+		}
+	}
+
+	callback()
+}
+
+function authenticateUserRequest(postParams, callback)
+{
+	var queryStringHead = "<create xmlns='http://autotask.net/ATWS/v1_6/'><Entities>"
+	var queryStringTail = "</Entities></create>"
+	var query = ""
+	for (var i = 0; i < travelData.length; i++)
+	{
+		var day = travelData[i]
+		for (var j = 0; j < day.length; j++)
+		{
+			var trip = day[j]
+
+			var associatedAccount = trip.toAccountID
+			if (associatedAccount == -1)
+				associatedAccount = trip.fromAccountID
+			if (associatedAccount == -1)
+				continue
+
+			if (accountIDToAnnualProjectMap[associatedAccount])
+			{
+				travelData[i][j].annualProjectID = accountIDToAnnualProjectMap[associatedAccount]
+				trip.annualProjectID = travelData[i][j].annualProjectID
+			}
+
+			var ticketDate = trip.arriveTime
+			if (ticketDate == -1)
+				ticketDate = ticket.leaveTime
+			if (ticketDate == -1)
+				continue
+
+			if (cachedExpenseItemHashes[hashTrip(trip)])
+			{
+				console.log("Ignoring cached expense")
+				continue
+			}
+			cachedExpenseItemHashes[hashTrip(trip)] = true
+
+			query +=	"<Entity xsi:type='ExpenseItem' xmlns:xsi='http://www.w3.org/2001/XMLSchema-instance'>" +
+						"<AccountID>" + associatedAccount + "</AccountID>" +
+						"<ReceiptAmount>" + parseFloat(trip.distance) * config.DOLLARS_PER_MILE + "</ReceiptAmount>" +
+						"<BillableToAccount>" + "true" + "</BillableToAccount>" +
+						"<Description>" + TRAVEL_DESCRIPTION + " " + trip.fromName + " to " + trip.toName + "</Description>" +
+						"<Destination>" + trip.toName + "</Destination>" +
+						"<ExpenseCategory>" + 2 + "</ExpenseCategory>" + // 2 = Mileage
+						"<ExpenseDate>" + formatDate(ticketDate) + "</ExpenseDate>" +
+						"<ExpenseReportID>" + expenseReportID + "</ExpenseReportID>" +
+						"<HaveReceipt>" + "true" + "</HaveReceipt>" +
+						"<Miles>" + trip.distance + "</Miles>" +
+						"<Origin>" + trip.fromName + "</Origin>" +
+						"<PaymentType>" + 14 + "</PaymentType>" + // Associated with the "Expense Type" field. 14 = "Other"
+					"</Entity>"
+		}
+	}
+
+	//console.log("Request: " + queryStringHead + query + queryStringTail),
+	sendRequest(queryStringHead + query + queryStringTail, function(apiResponse) {
+		xml2js(apiResponse, function(err, result) {
+			var expenseItems = getCreateEntities(result)
+
+			if (expenseItems == undefined || expenseItems.length == 0) // This would happen if all expenses were logged
+			{
+				addReturnLog("error", "Failed to create new expense items. Response:\n" + JSON.stringify(result))
+				callback(undefined)
+			}
+			else
+			{
+				//console.log(j(result))
+				addReturnLog("success", "Created expense items")
+				callback("true")
+			}
+			//callback(result)
+		})
+	}, "create")
+
+}
+
 module.exports =
 {
-	buildAddExpenseItemsRequest: buildAddExpenseItemsRequest,
+	buildAddExpenseItemsRequest : buildAddExpenseItemsRequest,
 
 	buildAddTravelTimeRequest: buildAddTravelTimeRequest,
 
@@ -1154,6 +1558,16 @@ module.exports =
 	
 	buildResourceRoleQuery : buildResourceRoleQuery,
 
-	roundToNearest15 : roundToNearest15
+	roundToNearest15 : roundToNearest15,
+
+	returnMessage : returnMessage,
+
+	addReturnLog : addReturnLog,
+
+	parseTicketsInformation : parseTicketsInformation,
+
+	getDistanceData : getDistanceData,
+
+	authenticateUserRequest : authenticateUserRequest
 	
 }; // Closing bracket of module exports

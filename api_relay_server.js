@@ -8,10 +8,6 @@ var xml2js = require("xml2js").parseString
 
 var config = require("./config") // Keeps API keys and other private information
 
-var accountInformation = {}
-//var travelDistanceData = {}
-var imperialOrMetric = "imperial"
-
 String.prototype.replaceAll = function(search, replacement) {
     var target = this;
     return target.replace(new RegExp(search, 'g'), replacement);
@@ -19,15 +15,39 @@ String.prototype.replaceAll = function(search, replacement) {
 
 http.createServer(function (request, nodeResponse)
 {
-	if (request.url != "/") return // only continue for root
+
+	if (request.method != "POST")
+	{
+		nodeResponse.writeHead(403, {'Content-Type': 'text/plain'});
+		nodeResponse.end("Invalid request")
+		return
+	}
+
+   	nodeResponse.writeHead(200, {'Content-Type': 'text/plain'});
+	console.log("\nStarting new connection")
+
+	var body = '';
+	request.on('data', function (data) {
+		body += data;
+		if (body.length > 1e6)
+			request.connection.destroy();
+	});
+	
+	request.on('end', function () {
+		var post = qs.parse(body);
+		uploadData(post, request, nodeResponse)
+       	});
+
+	console.log("Request url: " + request.url)
+	
+	//apiTools.nodeResponse = nodeResponse
+	
+	
+	//if (request.url == "/") return // only continue for root
 
 	// Send the HTTP header 
 	// HTTP Status: 200 : OK
 	// Content Type: text/plain
-   	nodeResponse.writeHead(200, {'Content-Type': 'text/plain'});
-
-	console.log("\nStarting new connection")
-
 	/*apiTools.buildFindTravelProjectQuery(426, function(apiResponse) {
 		apiTools.buildFindTravelProjectTaskQuery(apiResponse, function(apiResponse) {
 			nodeResponse.end(apiTools.j(apiResponse))
@@ -83,8 +103,9 @@ http.createServer(function (request, nodeResponse)
 		//nodeResponse.end(apiTools.j(apiResponse))
 	})
 	return*/
-	
-	/*apiTools.getThresholdAndUsageInfo(function(apiResponse) { // Use this field to query picklist options
+
+	/*
+	apiTools.getThresholdAndUsageInfo(function(apiResponse) { // Use this field to query picklist options
 		//console.log(apiResponse)
 		xml2js(apiResponse, function(err, result) {
 			nodeResponse.end(apiTools.j(result))
@@ -92,18 +113,19 @@ http.createServer(function (request, nodeResponse)
 		//nodeResponse.end(apiTools.j(apiResponse))
 	})
 	return*/
-	
-	var ticketData = apiTools.buildResourceQueryRequest("jfakult@vinsonedu.com", function(apiResponse) {
-		xml2js(apiResponse, function(err, result) {
-			if (result)
-			{
-				var resource = apiTools.getEntities(result)
-				var resourceID = resource[0].id
 
-				loadResourceTickets(nodeResponse, resourceID)
-			}
-		})
+	/*
+	 * If you like callback functions, you're in luck
+	 * The function calls tend to look like this:
+
+	apiTools.functionName(input, callback(output) {
+		apiTools.nextFunctionName(output), callback(nextOutput) ...
+		...
 	})
+
+	 */
+
+	
 	
 	/*var ticketData = apiTools.buildAccountIDQueryRequest(445, function(apiResponse) {
 		response.write(apiResponse.toString())
@@ -117,285 +139,90 @@ http.createServer(function (request, nodeResponse)
 
 }).listen(8001);
 
-function loadResourceTickets(nodeResponse, resourceID)
+function uploadData(postData, request, nodeResponse)
 {
-	var ticketData = apiTools.buildTicketsQueryRequest(resourceID, function(apiResponse)
+	var generatingTravelTimes = false
+
+	if (request.url == "/generateTravelTimes") 
 	{
-		/*for (var i = 0; resourceTickets.length; i++)
-		{
-			//console.log(resourceTickets)
-		}*/
-
-		xml2js(apiResponse, function(err, result) {
-			if (result)
-			{
-				var tickets = apiTools.getEntities(result)
-				
-				parseTicketsInformation(nodeResponse, tickets, resourceID)
-
-				//loadResourceTickets(nodeResponse, resourceID)
-			}
-			else
-			{
-				console.log("Error finding tickets: " + apiResponse)
-			}
-		})
-
-		//nodeResponse.write(apiResponse.toString())
-		//nodeResponse.end()
-	})
-}
-
-//Note: These values are actually TimeEntries from the API, not technically tickets. Just easier to understand this way I think
-function parseTicketsInformation(nodeResponse, tickets, requesterID)
-{
-	if (tickets == undefined || tickets.length == 0)
-	{
-		nodeResponse.end("No tickets were returned")
-		return
+		generatingTravelTimes = true
 	}
-	var ticketsData = []
-	for (var i = 0; i < tickets.length; i++)
+	else if (request.url == "/generateExpenseReports")
 	{
-		var ticket = tickets[i]
-
-		if (ticket == undefined) continue
-		if (ticket.Type[0]._  == "6")  // Ignore all Travel related time entries (really we probably only want to log tickets where type = 2)
-			continue
-
-		var ticketData = {}
-
-		ticketData.StartDateTime = ticket.StartDateTime[0]._
-		ticketData.EndDateTime = ticket.EndDateTime[0]._
-		ticketData.ContractID = ticket.ContractID[0]._
-
-		ticketsData.push(ticketData)
+		generatingTravelTimes = false
 	}
-
-	ticketsData = apiTools.sortTickets(ticketsData)
-
-	//console.log("Before: " + apiTools.j(ticketsData))
-
-	apiTools.buildContractIDsQueryRequest(ticketsData.map((val) => val.ContractID), function(accountIDs) {
-		apiTools.buildFindTravelProjectQuery(accountIDs, function(projectIDs) {
-			apiTools.buildFindTravelProjectTaskQuery(projectIDs, function(taskIDs) {
-				//console.log("After1: " + apiTools.j(ticketsData))
-				apiTools.buildAccountIDsQueryRequest(accountIDs, function(accountsData) {
-					apiTools.extrapolateTravelData(ticketsData, accountsData, function(travelData) {
-						//console.log("After2: " + apiTools.j(ticketsData))
-						//nodeResponse.end(JSON.stringify(ticketsData, null, 4) + "\n" + JSON.stringify(travelData, null, 4))
-						getDistanceData(travelData, nodeResponse, requesterID)
-					})
-				})
-			})
-		})
-	})
-}
-
-// Caches data in apiTools.travelDistanceMap
-var homeAddress = "29156 Chardon rd Willoughby Hills, Ohio"
-
-// Inputs distances that are already cached. returns a tuple of [the number of entries that were not found in the cache, updated travel data]
-function loadCachedTravelData(travelData)
-{
-	//console.log("TravelMap: " + apiTools.j(apiTools.travelDistanceMap))
-	var totalDrives = 0
-	var totalCached = 0
-	for (var i = 0; i < travelData.length; i++) // Iterate over every days data
+	else
 	{
-		var dayData = travelData[i]
-		for (var j = 0; j < dayData.length; j++) // Iterate over the data for the day
-		{
-			totalDrives++
-			var trip = dayData[j]
-			var fromID = trip.fromAccountID
-			var toID = trip.toAccountID
-
-			if (apiTools.travelDistanceMap[fromID] && apiTools.travelDistanceMap[fromID][toID]) // if we have this data cached
-			{
-				travelData[i][j].distance = apiTools.travelDistanceMap[trip.fromAccountID][trip.toAccountID][0]
-				totalCached++
-			}
-			else if (fromID == -1) // came from home
-			{
-				//console.log("Trip: " + apiTools.j(trip))
-				if (apiTools.travelDistanceMap["Home"] && apiTools.travelDistanceMap["Home"][toID])
-				{
-					//console.log("Home map: " + apiTools.j(apiTools.travelDistanceMap["Home"]))
-					travelData[i][j].distance = apiTools.travelDistanceMap["Home"][trip.toAccountID][0]
-					travelData[i][j].leaveTime = new Date(new Date(trip.arriveTime) - (apiTools.travelDistanceMap["Home"][trip.toAccountID][1] * 3600 * 1000)).toString()
-					//console.log("Time after: " + trip.leaveTime)
-					totalCached++
-				}
-			}
-			else if (toID == -1)
-			{
-				if (apiTools.travelDistanceMap[fromID] && apiTools.travelDistanceMap[fromID]["Home"])
-				{
-					travelData[i][j].distance = apiTools.travelDistanceMap[trip.fromAccountID]["Home"][0]
-					travelData[i][j].arriveTime = new Date(new Date(trip.leaveTime).getTime() + (apiTools.travelDistanceMap[trip.fromAccountID]["Home"][1] * 3600 * 1000)).toString() // Had to be careful with adding dates
-					totalCached++
-				}
-			}
-			else
-			{
-				//console.log("Don't know: " + apiTools.j(trip))
-			}
-			travelData[i][j].totalTimeHours = apiTools.roundToNearest15(travelData[i][j].leaveTime, travelData[i][j].arriveTime)
-		}
-	}
-
-	return [totalDrives - totalCached, travelData]
-}
-
-Set.prototype.toArray = function()
-{
-	var arr = []
-	var iter = this.values()
-	var val = iter.next()
-	while (!val.done)
-	{
-		arr.push(val.value)
-		val = iter.next()
-	}
-
-	return arr
-}
-
-// Recurses one time in order to 
-function getDistanceData(travelData, nodeResponse, requesterID, recursing = false)
-{
-	var cacheData = loadCachedTravelData(travelData)
-
-	var uncachedTrips = cacheData[0]
-	travelData = cacheData[1]
-
-	// Recursive base case
-	if (uncachedTrips == 0)
-	{
-		//nodeResponse.end(apiTools.j(travelData))
-
-		uploadTravelData(travelData, nodeResponse, requesterID)
-
+		nodeResponse.end("Invalid request")
 		return
 	}
 
-	if (recursing)
-	{
-		console.log("Google Maps was unable to find an address")
-		nodeResponse.end("Error looking up address")
-		return
-	}
+	apiTools.authenticateUserRequest(postParams, function(emailAddress, homeAddress) {
+		if (emailAddress == undefined || homeAddress == undefined) sendResponse(nodeResponse)
+		
+ 	 apiTools.buildResourceQueryRequest(emailAddress, function(resourceID) {
+ 	 	 if (resourceID == undefined) sendResponse(nodeResponse)
 
-	var apiURL = "https://maps.googleapis.com/maps/api/distancematrix/json?"
+	  apiTools.buildTicketsQueryRequest(resourceID, generatingTravelTimes, function(tickets) {
+		  if (tickets == undefined) sendResponse(nodeResponse)
+ 
+ 	   apiTools.parseTicketsInformation(tickets, function(ticketsData) {
+		   if (ticketsData == undefined) sendResponse(nodeResponse)
+		  
+		   var contractIDs = ticketsData.map((val) => val.ContractID)
+		   if (contractIDs == undefined) sendResponse(nodeResponse)
 
-	var originParams = new Set()
-	var destParams = new Set()
+	    apiTools.buildContractIDsQueryRequest(contractIDs, function(accountIDs) {
+		    if (accountIDs == undefined) sendResponse(nodeResponse)
 
-	for (var i = 0; i < travelData.length; i++) // Iterate over every days data
-	{
-		var dayData = travelData[i]
-		for (var j = 0; j < dayData.length; j++) // Iterate over the data for the day
-		{
-			var trip = dayData[j]
-			var fromID = trip.fromAccountID
-			var toID = trip.toAccountID
-			if (apiTools.travelDistanceMap[fromID] && apiTools.travelDistanceMap[fromID][toID]) // if we have this data cached
-			{
-				continue
-			}
-			else
-			{
-				originParams.add(trip.fromAddress)
-				destParams.add(trip.toAddress)
-			}
-		}
-	}
+	     apiTools.buildAccountIDsQueryRequest(accountIDs, function(accountsData) {
+		     if (accountsData == undefined) sendResponse(nodeResponse)
 
-	originParams = originParams.toArray()
-	destParams = destParams.toArray()
-	var addresses = originParams.concat(destParams).concat(homeAddress)
+	      apiTools.extrapolateTravelData(ticketsData, accountsData, function(travelData) {
+		      if (travelData == undefined) sendResponse(nodeResponse)
 
-	var requestURL = apiURL + "origins="+ originParams.join("|") + "&units=" + imperialOrMetric + "&destinations=" + destParams.join("|" )+ "&key=" + config.MAPS_API_KEY
+	       apiTools.getDistanceData(travelData, nodeResponse, resourceID, function(travelData) {
+		       if (travelData == undefined) sendResponse(nodeResponse)
 
-	//console.log(requestURL)
-	https.get(requestURL, (resp) => {
-  		let data = '';
+		       if (generatingTravelTimes)
+		       {
+			       console.log("Generating travel times")
 
-		// A chunk of data has been recieved.
-		resp.on('data', (chunk) => {
-			data += chunk;
-		});
+			       apiTools.buildFindTravelProjectQuery(accountIDs, function(projectIDs) {  // This function and the function below get all their data saved into
+	        	               if (projectIDs == undefined) sendResponse(nodeResponse)          // The cache, that is why their returned values are not used
+			       
+			        apiTools.buildFindTravelProjectTaskQuery(projectIDs, function(taskIDs) {
+		     	                if (taskIDs == undefined) sendResponse(nodeResponse)
 
-		// The whole response has been received. Print out the result.
-		resp.on('end', () => {
-			parseDistanceMatrix(data, addresses, function() {
-				getDistanceData(travelData, nodeResponse, requesterID, true)
-			})
-		})
+				 apiTools.buildAddTravelTimeRequest(travelData, resourceID, function() {
+					 sendResponse(nodeResponse)
+		 		 })
+			        })
+			       })
+		       }
+		       else // Generating an expense report
+		       {
+		 	       console.log("Generating expense Reports")
 
-		resp.on("error", (err) => {
-			console.log("Error: " + err.message);
-		})
+			       apiTools.buildUploadDataRequest(travelData, resourceID, function() {
+				       sendResponse(nodeResponse)
+			       })
+		       } 
+	       })
+	      })
+	     })
+	    })
+	   })
+	  })
+	 })
 	})
 }
 
-function parseDistanceMatrix(matrix, addresses, callback)
+function sendResponse(nodeResponse)
 {
-	//console.log(apiTools.j(apiTools.addressToAccountIDMap))
-	data = JSON.parse(matrix)
-	//console.log(matrix)
-
-	var destinations = data.destination_addresses
-	var origins = data.origin_addresses
-	var distances = data.rows
-
-	for (var o = 0; o < origins.length; o++)
-	{
-		var elements = distances[o].elements
-		var origin = origins[o]
-		for (var d = 0; d < destinations.length; d++)
-		{
-			var values = elements[d]
-			var distanceMiles = Math.ceil(values.distance.value / 1608) // Convert meters to miles and round up
-			var timeHours = Math.ceil((values.duration.value / 3600) * 4) / 4  // Convert seconds to hours and round up to the nearest 15
-
-			//Not used currently
-			var estimatedTime = values.duration.value / 3600.0 // convert seconds to hours
-			estimatedTime = Math.ceil(estimatedTime * 4) / 4 // Round up to the nearest quarter hour
-
-			var dest = destinations[d]
-			var fromAddressConversion = apiTools.findAddress(dest, addresses)
-			var toAddressConversion = apiTools.findAddress(origin, addresses)
-
-			var fromID = apiTools.addressToAccountIDMap[fromAddressConversion[1]]
-			var toID = apiTools.addressToAccountIDMap[toAddressConversion[1]]
-
-			if (fromID == undefined) fromID = "Home"
-			if (toID == undefined) toID = "Home"
-
-			if (apiTools.travelDistanceMap[fromID] && apiTools.travelDistanceMap[fromID][toID]) // if we have this data cached
-				continue
-
-			if (!apiTools.travelDistanceMap[fromID])
-				apiTools.travelDistanceMap[fromID] = {}
-			if (!apiTools.travelDistanceMap[toID])
-				apiTools.travelDistanceMap[toID] = {}
-
-			apiTools.travelDistanceMap[fromID][toID] = [distanceMiles, timeHours]
-			apiTools.travelDistanceMap[toID][fromID] = [distanceMiles, timeHours]
-		}
-	}
-
-	callback()
+	console.log(apiTools.returnMessage)
+	nodeResponse.end(JSON.stringify(apiTools.returnMessage, null, 4))
+	return
 }
-
-function uploadTravelData(travelData, nodeResponse, requesterID)
-{
-	apiTools.buildUploadDataRequest(travelData, requesterID, function(response) {
-		nodeResponse.end(response)
-	})
-}
-
 
 console.log('Server running at http://127.0.0.1:8001/');
