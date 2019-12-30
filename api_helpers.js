@@ -20,6 +20,7 @@ var xml2js = require("xml2js").parseString
 var EXPENSE_TITLE = "Gas Expenses" // name of the expense report. The month will be added (e.g EXPENSE_TITLE="Gas" will create the report: "Gas for August 2019")
 var TRAVEL_DESCRIPTION = "Travel from" // Same as above
 
+var emailToAuthTokenMap = {}
 var emailToResourceIDMap = {}
 var contractIDToAccountIDMap = {}
 var travelDistanceMap = {}
@@ -30,6 +31,7 @@ var annualProjectIDToTaskIDMap = {}
 var accountInformation = {}
 //var travelDistanceData = {}
 var imperialOrMetric = "imperial"
+var ignoreCache = false
 
 var cachedTimeEntryHashes = {}   // This should probably be saved in a database but this is fine for now...
 var cachedExpenseItemHashes = {} // Just don't restart the server more often that monthly...
@@ -346,7 +348,7 @@ function hashTrip(trip)
 	orderedValues.push(trip.arriveTime)
 	orderedValues.push(trip.fromAccountID)
 	orderedValues.push(trip.toAccountID)
-	// TODO: Add resourceID here
+	orderedValues.push(trip.resourceID)
 
 	return JSON.stringify(orderedValues)
 }
@@ -365,9 +367,7 @@ function roundToNearest15(startTime, endTime, inc = 4) // Round the hour into "i
 	return roundedHours
 }
 
-// TODO
-var homeAddress = "29156 Chardon rd Willoughby Hills, Ohio"
-function extrapolateTravelData(ticketsData, accountsData, callback)
+function extrapolateTravelData(ticketsData, accountsData, homeAddress, resourceID, callback)
 {
 	var travelData = []  // An array where each index has the travel data for a single day (travelData[0] is Monday's travel data, etc)
 
@@ -398,6 +398,7 @@ function extrapolateTravelData(ticketsData, accountsData, callback)
 		//console.log("Ticket incoming: " + j(ticketsData[i]))
 		var ticket = ticketsData[i]
 		var trip = {}
+		trip.resourceID = resourceID
 		//log("Ticket", j(ticket))
 
 		var ticketAccountID = contractIDToAccountIDMap[ticket.ContractID]
@@ -996,7 +997,7 @@ function buildAddTravelTimeRequest(travelData, resourceID, callback)
 		{
 			resourceIDs.push(entities[i].RoleID[0]._)
 		}
-		// TODO: Move to server.js
+		
 		buildRolesQuery(resourceIDs, function(apiResponse) {
 			var entities = getEntities(apiResponse)
 			var roleID = -1
@@ -1039,7 +1040,7 @@ function buildAddTravelTimeRequest(travelData, resourceID, callback)
 
 						if (trip.totalTimeHours == 0)
 						{
-							// TODO: Warn about skipping this ticket
+							addReturnLog("warning", "Skipping time entry for the trip from " + trip.fromName + " to " + trip.toName + " on " + new Date(trip.startTime).toLocaleString() + "\nReason: travel time has been calculated as 0 minutes")
 							continue
 						}
 						//console.log("Trip before: " + JSON.stringify(travelData][i][j]))
@@ -1049,7 +1050,7 @@ function buildAddTravelTimeRequest(travelData, resourceID, callback)
 							associatedAccount = trip.fromAccountID
 						if (associatedAccount == -1)
 						{
-							// TODO: Warn that we were unable to find these accounts
+							addReturnLog("warning", "Unable to find the accounts " + trip.fromName + " and " + trip.toName)
 							continue
 						}
 
@@ -1077,7 +1078,7 @@ function buildAddTravelTimeRequest(travelData, resourceID, callback)
 
 						if (trip.taskID == undefined) // Don't log this, give an error warning
 						{
-							// TODO: Log warning
+							addReturnLog("warning", "Unable to find the travel task for the annual project associated with: " + associatedAccount)
 							continue
 						}
 
@@ -1101,8 +1102,6 @@ function buildAddTravelTimeRequest(travelData, resourceID, callback)
 						}
 						cachedTimeEntryHashes[hashTrip(trip)] = true
 
-						//log("Trip", JSON.stringify(trip))
-
 						query +="<Entity xsi:type='TimeEntry' xmlns:xsi='http://www.w3.org/2001/XMLSchema-instance'>" +
 								"<DateWorked>" + formatDate(ticketDate) + "</DateWorked>" +
 								"<EndDateTime>" + formatDate(trip.arriveTime) + "</EndDateTime>" +
@@ -1113,9 +1112,6 @@ function buildAddTravelTimeRequest(travelData, resourceID, callback)
 								"<TaskID>" + trip.taskID + "</TaskID>" +
 								"<Type>" + 12 + "</Type>" +  // 12 is TravelTime
 							"</Entity>\n\n"
-
-
-						//console.log("Trip after: " + JSON.stringify(travelData[i][j]))
 					}
 				}
 
@@ -1432,80 +1428,169 @@ function parseDistanceMatrix(matrix, addresses, callback)
 	callback()
 }
 
-function authenticateUserRequest(postParams, callback)
+function authenticateUserRequest(postParams, resourceID, callback)
 {
-	var queryStringHead = "<create xmlns='http://autotask.net/ATWS/v1_6/'><Entities>"
-	var queryStringTail = "</Entities></create>"
-	var query = ""
-	for (var i = 0; i < travelData.length; i++)
+	var email = clean(postParams["email"])
+	var address = clean(postParams["homeAddress"])
+	var authToken = clean(postParams["authToken"])
+	var mostRecentTickets = postParams["recentTickets"]
+	var mostRecentExpenseReports = postParams["recentExpenseReports"]
+	var rewriteData = !!postParams["writeAgain"]
+
+	if (email == undefined)
 	{
-		var day = travelData[i]
-		for (var j = 0; j < day.length; j++)
-		{
-			var trip = day[j]
-
-			var associatedAccount = trip.toAccountID
-			if (associatedAccount == -1)
-				associatedAccount = trip.fromAccountID
-			if (associatedAccount == -1)
-				continue
-
-			if (accountIDToAnnualProjectMap[associatedAccount])
-			{
-				travelData[i][j].annualProjectID = accountIDToAnnualProjectMap[associatedAccount]
-				trip.annualProjectID = travelData[i][j].annualProjectID
-			}
-
-			var ticketDate = trip.arriveTime
-			if (ticketDate == -1)
-				ticketDate = ticket.leaveTime
-			if (ticketDate == -1)
-				continue
-
-			if (cachedExpenseItemHashes[hashTrip(trip)])
-			{
-				console.log("Ignoring cached expense")
-				continue
-			}
-			cachedExpenseItemHashes[hashTrip(trip)] = true
-
-			query +=	"<Entity xsi:type='ExpenseItem' xmlns:xsi='http://www.w3.org/2001/XMLSchema-instance'>" +
-						"<AccountID>" + associatedAccount + "</AccountID>" +
-						"<ReceiptAmount>" + parseFloat(trip.distance) * config.DOLLARS_PER_MILE + "</ReceiptAmount>" +
-						"<BillableToAccount>" + "true" + "</BillableToAccount>" +
-						"<Description>" + TRAVEL_DESCRIPTION + " " + trip.fromName + " to " + trip.toName + "</Description>" +
-						"<Destination>" + trip.toName + "</Destination>" +
-						"<ExpenseCategory>" + 2 + "</ExpenseCategory>" + // 2 = Mileage
-						"<ExpenseDate>" + formatDate(ticketDate) + "</ExpenseDate>" +
-						"<ExpenseReportID>" + expenseReportID + "</ExpenseReportID>" +
-						"<HaveReceipt>" + "true" + "</HaveReceipt>" +
-						"<Miles>" + trip.distance + "</Miles>" +
-						"<Origin>" + trip.fromName + "</Origin>" +
-						"<PaymentType>" + 14 + "</PaymentType>" + // Associated with the "Expense Type" field. 14 = "Other"
-					"</Entity>"
-		}
+		addReturnLog("error", "User email address ('email'): <i>undefined<i>")
+		callback(undefined)
+		return
+	}
+	if (address == undefined)
+	{
+		addReturnLog("error", "User home address ('homeAddress'): <i>undefined<i>")
+		callback(undefined)
+		return
+	}
+	if (authToken == undefined)
+	{
+		addReturnLog("error", "No Autotask auth token ('authToken')) has been provided")
+		callback(undefined)
+		return
+	}
+	if (rewriteData == undefined)
+	{
+		addReturnLog("error", "You must specify whether you want to rewrite ticket data even if it has been previously uploaded ('writeAgain')")
+		callback(undefined)
+		return
 	}
 
-	//console.log("Request: " + queryStringHead + query + queryStringTail),
+		ignoreCache = rewriteData
+
+	if (emailToAuthTokenMap[email]) == authToken)
+	{
+		callback(email, homeAddress)
+		return
+	}
+	
+	var queryStringHead = ""
+	var query = ""
+	var queryStringTail = ""
+
+	var desiredResponseLength = -1
+	if (mostRecentExpenseReports != undefined)    // We are uploading expense report data
+	{
+		var expenseReportNames = mostRecentExpenseReports["expenseReportNames"]
+		var expenseReportPeriodsEnding = mostRecentExpenseReports["periodsEnding"]
+		var expenseReportAmountsDue = mostRecentExpenseReports["amountsDue"]
+
+		if (expenseReportNames == undefined || expenseReportPeriodsEnding == undefined || expenseReportAmountsDue == undefined)
+		{
+			addReturnLog("error", "Misformed POST data")
+			callback(undefined)
+			return
+		}
+		if  (expenseReportNames.length == 0 || expenseReportPeriodsEnding.length == 0 || expenseReportAmountsDue.length == 0)
+		{
+			addReturnLog("error", "Misformed POST data")
+			callback(undefined)
+			return
+		}
+		if  (expenseReportNames.length != expenseReportPeriodsEnding.length || expenseReportPeriodsEnding.length != expenseReportAmountsDue)
+		{
+			addReturnLog("error", "Misformed POST data")
+			callback(undefined)
+			return
+		}
+		desiredResponseLength = expenseReportNames.length
+		
+		var queryStringHead = "<query xmlns='http://autotask.net/ATWS/v1_6/'><sXML><![CDATA[<queryxml><entity>ExpenseReport</entity><query>"
+		var query1 = "<field>Name"
+		var query2 = "<field>WeekEnding"
+		var query3 = "<field>AmountDue"
+
+		for (var i = 0; i < expenseReportNames.length; i++)
+		{
+			var query1 +=  "<expression op='equals'>" + expenseReportNames[i] + "</expression>"
+			var query2 += "<expression op='equals'>" + expenseReportPeriodsEnding[i] + "</expression>"
+			var query3 += "<expression op='equals'>" + expenseReportAmountsDue[i] + "</expression>"
+		}
+		query1 += "</field>"
+		query2 += "</field>"
+		query3 += "</field>"
+
+		var query4 += "<field>SubmitterID<expression op='equals'>" + resourceID + "</expression></field>"
+
+		query = query1 + query2 + query3 + query4
+		queryStringTail = "</query></queryxml>]]></sXML></query>"
+	}
+	else if (mostRecentTickets != undefined)
+	{
+		var ticketNumbers = mostRecentTickets["ticketNumbers"]
+		var ticketTimesWorked = mostRecentTickets["timesWorked"]
+
+		if (ticketNumbers== undefined || ticketTimesWorked == undefined)
+		{
+			addReturnLog("error", "Misformed POST data")
+			callback(undefined)
+			return
+		}
+		if  (ticketNumbers.length == 0 || ticketTimesWorked.length == 0)
+		{
+			addReturnLog("error", "Misformed POST data")
+			callback(undefined)
+			return
+		}
+		if  (ticketNumbers.length != ticketTimesWorked.length)
+		{
+			addReturnLog("error", "Misformed POST data")
+			callback(undefined)
+			return
+		}
+		desiredResponseLength = ticketNumbers.length
+
+		var queryStringHead = "<query xmlns='http://autotask.net/ATWS/v1_6/'><sXML><![CDATA[<queryxml><entity>Ticket</entity><query>"
+		var query1 = "<field>TicketNumber"
+		//var query2 = "<field>"
+
+		for (var i = 0; i < expenseReportNames.length; i++)
+		{
+			var query1 +=  "<expression op='equals'>" + ticketNumbers[i] + "</expression>"
+			//var query2 += "<expression op='equals'>" + expenseReportPeriodsEnding[i] + "</expression>"
+			//var query3 += "<expression op='equals'>" + expenseReportAmountsDue[i] + "</expression>"
+		}
+		query1 += "</field>"
+		query2 += "</field>"
+		query3 += "</field>"
+
+		var query4 += "<field>SubmitterID<expression op='equals'>" + resourceID + "</expression></field>"
+
+		query = query1// + query2 + query3 + query4
+		queryStringTail = "</query></queryxml>]]></sXML></query>"
+
+	}
+	else
+	{
+		addReturnLog("error", "No relevant travel data given to server")
+		callback(undefined)
+		return
+	}
+
 	sendRequest(queryStringHead + query + queryStringTail, function(apiResponse) {
 		xml2js(apiResponse, function(err, result) {
-			var expenseItems = getCreateEntities(result)
+			var entities = getEntities(result)
 
-			if (expenseItems == undefined || expenseItems.length == 0) // This would happen if all expenses were logged
+			if (entities== undefined || entities.length == 0 || entities.length != desiredResponseLength)
 			{
-				addReturnLog("error", "Failed to create new expense items. Response:\n" + JSON.stringify(result))
+				addReturnLog("error", "It seems like you are trying to impersonate someone! This request has been logged.") // No it hasn't :)
+				addReturnLog("warning", "If this is an error, and it persists, please contact <b>Jacob Fakult<b>")
 				callback(undefined)
 			}
 			else
 			{
-				//console.log(j(result))
-				addReturnLog("success", "Created expense items")
-				callback("true")
+				emailToAuthTokenMap[email] = authToken
+				callback(email, homeAddress)
 			}
 			//callback(result)
 		})
-	}, "create")
-
+	})
 }
 
 module.exports =

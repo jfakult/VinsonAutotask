@@ -157,11 +157,12 @@ function uploadData(postData, request, nodeResponse)
 		return
 	}
 
-	apiTools.authenticateUserRequest(postParams, function(emailAddress, homeAddress) {
-		if (emailAddress == undefined || homeAddress == undefined) sendResponse(nodeResponse)
-		
- 	 apiTools.buildResourceQueryRequest(emailAddress, function(resourceID) {
- 	 	 if (resourceID == undefined) sendResponse(nodeResponse)
+			
+ 	apiTools.buildResourceQueryRequest(emailAddress, function(resourceID) {
+ 	 	if (resourceID == undefined) sendResponse(nodeResponse)
+
+	 apiTools.authenticateUserRequest(postParams, resourceID, function(emailAddress, homeAddress) {
+		 if (emailAddress == undefined || homeAddress == undefined) sendResponse(nodeResponse)
 
 	  apiTools.buildTicketsQueryRequest(resourceID, generatingTravelTimes, function(tickets) {
 		  if (tickets == undefined) sendResponse(nodeResponse)
@@ -178,12 +179,14 @@ function uploadData(postData, request, nodeResponse)
 	     apiTools.buildAccountIDsQueryRequest(accountIDs, function(accountsData) {
 		     if (accountsData == undefined) sendResponse(nodeResponse)
 
-	      apiTools.extrapolateTravelData(ticketsData, accountsData, function(travelData) {
+	      apiTools.extrapolateTravelData(ticketsData, accountsData, homeAddress, resourceID, function(travelData) {
 		      if (travelData == undefined) sendResponse(nodeResponse)
 
 	       apiTools.getDistanceData(travelData, nodeResponse, resourceID, function(travelData) {
 		       if (travelData == undefined) sendResponse(nodeResponse)
 
+		       sendResponse(nodeResponse)  //TODO: temp lock
+		       return
 		       if (generatingTravelTimes)
 		       {
 			       console.log("Generating travel times")
