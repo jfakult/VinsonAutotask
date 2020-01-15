@@ -20,6 +20,11 @@ var xml2js = require("xml2js").parseString
 var EXPENSE_TITLE = "Gas Expenses" // name of the expense report. The month will be added (e.g EXPENSE_TITLE="Gas" will create the report: "Gas for August 2019")
 var TRAVEL_DESCRIPTION = "Travel from" // Same as above
 
+const STATUS_GOOD = 0
+const STATUS_WARN = 1
+const STATUS_ERR  = 2
+const STATUS_MAP = ["Success", "Warning", "Error"]
+
 var emailToAuthTokenMap = {}
 var emailToResourceIDMap = {}
 var contractIDToAccountIDMap = {}
@@ -75,8 +80,14 @@ var requestTail = "</soap:Body>" +
 "</soap:Envelope>";
 
 // Cleaning up inputs to deny string injection attacks
-function clean(val)
+function clean(val, justQuotes = false)
 {
+	if (val == undefined)
+		return val
+
+	if (justQuotes)
+		return val.replace(/["']/g, "");
+
 	return val.replace(/[|&;$%@"'<>()+,]/g, "");
 }
 
@@ -113,10 +124,59 @@ function formatDate(dateValue)
 	return currentYear + '-' + current_month + '-' + current_date + 'T' + current_hrs + ':' + current_mins + ':' + current_secs
 }
 
+/*
+ * Entity is a string value
+ * fields is an array of strings, represents the field values that you want to query
+ * expressions is an array of objects. Each index corresponds with a field, and looks like [{"op": opValue, "val": value}]
+ */
+function buildGenericQuery(entity, fields, expressions, callback)
+{
+	if (fields.length != expressions.length)
+	{
+		console.log("Invalid params")
+		callback(undefined)
+		return
+	}
+
+	var queryStringHead = "<query xmlns='http://autotask.net/ATWS/v1_6/'><sXML><![CDATA[<queryxml><entity>" + entity + "</entity><query"
+	var queryStringTail = "</field></query></queryxml>]]></sXML></query>"
+
+	var queryBody = ""
+
+	for (var i = 0; i < fields.length; i++)
+	{
+		queryBody += "<field>" + fields[i]
+
+		for (var j = 0; j < expressions[i].length; j++)
+		{
+			queryBody += "<expression op='" + expressions[i][j]["op"] + "'>" + expressions[i][j]["val"] + "</expression>"
+		}
+
+		queryBody += "</field>"
+	}
+
+	sendRequest(queryStringHead + queryBody + queryStringTail, function(apiResponse) {
+		xml2js(apiResponse, function(err, result) {
+			var entities = getEntities(result)
+
+			if (entities && enities.length > 0)
+			{
+				callback(entities)
+			}
+			else
+			{
+				addReturnLog(STATUS_ERR, "No entities were found in generic request for: " + entity + "s")
+				callback(undefined)
+			}
+		})
+	})
+
+}
+
 function buildTicketsQueryRequest(resourceID, generatingTravelTimes, callback) // Queries for a list of all tickets since "last monday"
 {
 	var lastMonday = new Date()
-	lastMonday.setHours(0)
+	lastMonday.setHours(1)
 	lastMonday.setMinutes(0)
 
 	if (generatingTravelTimes)
@@ -125,7 +185,9 @@ function buildTicketsQueryRequest(resourceID, generatingTravelTimes, callback) /
 	}
 	else
 	{
-		lastMonday.setDate(1)
+		lastMonday.setDate(1)                               // Set the date to the first of the month
+		if (lastMonday.getDay() > 1)
+			lastMonday.setDate(1 - lastMonday.getDay()) // If the first day is not a monday, rewind the date to the previous monday
 	}
 
 	var queryStringHead = "<query xmlns='http://autotask.net/ATWS/v1_6/'><sXML><![CDATA[<queryxml><entity>TimeEntry</entity><query><field>StartDateTime"
@@ -135,15 +197,15 @@ function buildTicketsQueryRequest(resourceID, generatingTravelTimes, callback) /
 
 	sendRequest(queryStringHead + queryBody + queryStringTail, function(apiResponse) {
 		xml2js(apiResponse, function(err, result) {
-			if (result)
+			var tickets = getEntities(result)
+
+			if (tickets && tickets.length > 0)
 			{
-				var tickets = getEntities(result)
-				
 				callback(tickets)
 			}
 			else
 			{
-				addReturnLog("error", "No tickets were found for resource: " + resourceID)
+				addReturnLog(STATUS_ERR, "No tickets were found for resource: " + resourceID)
 				callback(undefined)
 			}
 		})
@@ -162,14 +224,16 @@ function buildResourceQueryRequest(resourceEmail, callback)
 	sendRequest(queryStringHead + queryBody + queryStringTail, function(apiResponse) {
 		xml2js(apiResponse, function(err, result) {
 			var resources = getEntities(result)
-			if (resources.length > 0)
+			if (resources == undefined || resources.length == 0)
 			{
-				callback(resources[0].id[0])
+				log("Resources", resources)
+				log("Query", queryBody)
+				addReturnLog(STATUS_ERR, "No resources found that match the email: " + resourceEmail)
+				callback(undefined)
 			}
 			else
 			{
-				addReturnLog("error", "No resources found that match the email: " + resourceEmail)
-				callback(undefined)
+				callback(resources[0].id[0])
 			}
 		})
 	})
@@ -185,7 +249,6 @@ function buildContractIDsQueryRequest(contractIDs, callback)
 	var queries = ""
 	for (var i = 0; i < contractIDs.length; i++)
 	{
-			
 		var contractID = contractIDs[i]
 
 		if (contractIDToAccountIDMap[contractID] != undefined) // Check to see if we have already seen this contractID
@@ -217,8 +280,18 @@ function buildContractIDsQueryRequest(contractIDs, callback)
 			}
 			else
 			{
-				addReturnLog("error", "No accounts returned from list of contracts: " + j(contractIDs))
-				callback(undefined)
+				// Cached values will already have been added to the accountIDs array
+				if (accountIDs.length > 0)
+				{
+					callback(accountIDs)
+				}
+				else
+				{
+					log("Query", queries)
+					log("Error", j(result))
+					addReturnLog(STATUS_ERR, "No accounts returned from list of contracts: " + j(contractIDs))
+					callback(undefined)
+				}
 			}
 		})
 	})
@@ -247,7 +320,8 @@ function buildAccountIDsQueryRequest(accountIDs, callback)
 
 			if (accounts == undefined || accounts.length == 0)
 			{
-				addReturnLog("error", "No accounts found with IDs: " + j(accountIDs))
+				log("Error", JSON.stringify(result))
+				addReturnLog(STATUS_ERR, "No accounts found with IDs: " + j(accountIDs))
 				callback(undefined)
 				return
 			}
@@ -308,6 +382,13 @@ function sendRequest(soapXML, callback, action = "query", log = false)
 
 		res.on("end", () => {
 			console.log(action + " recieved")
+
+			if (responseData.indexOf("SoapException") >= 0)
+			{
+				addReturnLog(STATUS_ERR, "An API request error has occured. Please contact your System Administrator to resolve this")
+				console.log(responseData)
+			}
+
 			callback(responseData)
 		});
 	});
@@ -385,7 +466,7 @@ function extrapolateTravelData(ticketsData, accountsData, homeAddress, resourceI
 	}
 	else
 	{
-		addReturnLog("error", "No recent tickets have been found for you!")
+		addReturnLog(STATUS_ERR, "No recent tickets have been found for you!")
 		callback(undefined)
 		return
 	}
@@ -566,7 +647,7 @@ function buildUploadDataRequest(travelData, requesterID, callback)
 {
 	if (travelData.length == 0 || travelData[0].length == 0)
 	{
-		addReturnLog("error", "No travel data was found")
+		addReturnLog(STATUS_ERR, "No travel data was found")
 		callback(undefined)
 		return
 	}
@@ -574,84 +655,30 @@ function buildUploadDataRequest(travelData, requesterID, callback)
 	var firstTrip = travelData[0][0]
 	var lastTrip = travelData[travelData.length - 1][travelData.slice(-1)[0].length -1] // Javascript magic
 
-	//console.log("Trip dates: " + j(travelData[0][0]))
-	var startMonth = months[ (new Date(firstTrip.arriveTime)).getMonth() ]  //arrive because it is the first non-home trip of the month
-	var endMonth = months[ (new Date(lastTrip.leaveTime)).getMonth() ]	//leave for same reason as above
+	var endOfFirstWeek = new Date(firstTrip.arriveTime)
+	endOfFirstWeek.setDate(endOfFirstWeek.getDate() + (6 - endOfFirstWeek.getDay()))
+	endOfFirstWeek.setHours(23)
 
-	var startYear = (new Date(firstTrip.arriveTime)).getFullYear()
-	var endYear = (new Date(lastTrip.leaveTime)).getFullYear()
-	var splitIndex = months[startMonth]
+	// If the first week ends in the new month, the expense goes towards that month
+	var expenseMonth = months[ endOfFirstWeek.getMonth() ]
+	expenseYear = endOfFirstWeek.getFullYear()
 
-	// If the week crossed through the month, we need to create expense reports for both months
-	// Thus, this for loop iterates over the travelData to find which day of the week starts the new month
-	if (startMonth != endMonth)
-	{
-		for (var i = 0; i < travelData.length; i++)
-		{
-			var day = travelData[i]
-			if (day == undefined || day.length == 0)
-				continue
+	desiredName = EXPENSE_TITLE + " for " + expenseMonth + " " + expenseYear
 
-			if (splitIndex != months[new Date(day[0].arriveTime).getMonth()])
-			{
-				splitIndex = i  // Change the data type of the index from a month name to an index value then exit the for loop
-				break
-			}
-		}
-	}
-
-	var startDesiredName = EXPENSE_TITLE + " for " + startMonth + " " + startYear
-	var endDesiredName = EXPENSE_TITLE + " for " + endMonth + " " + endYear
-
-	buildFindExpenseReportQuery(startDesiredName, function(startExpenseReportID) {   // Technically this may cause issues for the edge case
-		if (startExpenseReportID == -1)					         // Where the user creates expense reports for the entire year
+	buildFindExpenseReportQuery(desiredName, function(expenseReportID) {        // Technically this may cause issues for the edge case
+		if (expenseReportID == -1)					         // Where the user creates expense reports for the entire year
 		{								         // AND calls them by the exact same name as this program wants to call them
-			buildCreateExpenseReportRequest(startDesiredName, firstTrip.arriveTime, requesterID, function(newStartExpenseReportID) {
-				if (startMonth != endMonth)
-				{
-					buildCreateExpenseReportRequest(endDesiredName, lastTrip.leaveTime, requesterID, function(endExpenseReportID) {
-						
-						buildAddExpenseItemsRequest(travelData.slice(0, splitIndex), newStartExpenseReportID, function(apiResponse) {
-						
-							buildAddExpenseItemsRequest(travelData.slice(splitIndex), endExpenseReportID, function(apiResponse)  {
-							
-								callback(apiResponse)
+			buildCreateExpenseReportRequest(desiredName, endOfFirstWeek, requesterID, function(newExpenseReportID) {
+				buildAddExpenseItemsRequest(travelData, newExpenseReportID, function(apiResponse) {
 
-							})
-						})
-					})
-				}
-				else
-				{
-					buildAddExpenseItemsRequest(travelData, newStartExpenseReportID, function(apiResponse) {
+					callback(apiResponse)
 
-						callback(apiResponse)
-
-					})
-				}
-			})
-		}
-		else if (startMonth != endMonth) // Split tickets into two sections
-		{
-			buildFindExpenseReportQuery(endDesiredName, function(endExpenseReportID) {
-
-				buildCreateExpenseReport(endDesiredName, lastTrip.leaveTime, requesterID, function(endExpenseReportID) {
-
-					buildAddExpenseItemsRequest(travelData.slice(0, splitIndex), newStartExpenseReportID, function(apiResponse) {
-
-						buildAddExpenseItemsRequest(travelData.slice(splitIndex), endExpenseReportID, function(apiResponse)  {
-
-							callback(apiResponse)
-
-						})
-					})
 				})
 			})
 		}
 		else
 		{
-			buildAddExpenseItemsRequest(travelData, startExpenseReportID, function(apiResponse) {
-				//console.log(j(apiResponse))
+			buildAddExpenseItemsRequest(travelData, expenseReportID, function(apiResponse) {
 				callback(apiResponse)
 			})
 		}
@@ -679,7 +706,7 @@ function buildFindTravelProjectTaskQuery(projectIDs, callback)
 			var projects = getEntities(result)
 			if (projects == undefined || projects.length == 0)
 			{
-				addReturnLog("error", "No tasks found for annual projects with IDs: " + j(projectIDs))
+				addReturnLog(STATUS_ERR, "No tasks found for annual projects with IDs: " + j(projectIDs))
 				callback(undefined)
 			}
 			else
@@ -700,6 +727,8 @@ function buildFindTravelProjectTaskQuery(projectIDs, callback)
 
 }
 
+// TODO : For administrators. Travel times will stop working after August until the new (e.g 2020-2021 Annual Projects) projects are created
+//
 // For there seems to be some glitch in the API where having multiple expressions per field and multiple fields
 // The result is that only the first expression is evaluated and the others are ignored
 function buildFindTravelProjectQuery(accountIDs, callback)
@@ -707,8 +736,14 @@ function buildFindTravelProjectQuery(accountIDs, callback)
 	var projectIDs = []
 	var currentYear = new Date()
 	var endYear = currentYear.getFullYear()
-	if (currentYear.getMonth() >= 7) // Starting from August, the new project will be ending during the next fiscal year
+	if (currentYear.getMonth() >= 7) // Starting from August, the new project will be ending during the next school year
+	{
 		endYear++
+	}
+	else
+	{
+		currentYear.setMonth(-12)  // If it is not august yet, we need to search for projects that were created last year
+	}
 	currentYear.setMonth(0)
 	currentYear.setDate(1)
 	currentYear.setHours(1)
@@ -736,7 +771,9 @@ function buildFindTravelProjectQuery(accountIDs, callback)
 			var projects = getEntities(result)
 			if (projects == undefined || projects.length == 0)
 			{
-				addReturnLog("error", "No annual projects were found to be associated with any accounts")
+				log("Annual Project Query", query)
+				log("Response", j(result))
+				addReturnLog(STATUS_ERR, "No annual projects were found to be associated with any accounts")
 				callback(undefined)
 			}
 			else
@@ -776,15 +813,12 @@ function buildRolesQuery(resourceIDs, callback)
 			var reports = getEntities(result)
 			if (reports == undefined || reports.length == 0)
 			{
-				addReturnLog("warning", "No roles found for resources: " + j(resourceIDs) + " (this means these people likely aren't field technicians)")
-				callback([])
+				addReturnLog(STATUS_WARN, "No roles found for resources: " + j(resourceIDs) + " (this means these people likely aren't field technicians)")
+				callback(undefined)
 			}
 			else
 			{
-				//console.log(j(reports))
-				reportID = reports[0].id[0]
-
-				callback(reportID)
+				callback(reports)
 			}
 		})
 	})
@@ -805,7 +839,7 @@ function buildResourceRoleQuery(resourceID, callback)
 			var reports = getEntities(result)
 			if (reports == undefined || reports.length == 0)
 			{
-				addReturnLog("error", "No ResourceRoles associated with resource: " + resourceID + " (This means you are not a field technician)")
+				addReturnLog(STATUS_ERR, "Unable to find a role associated with resource: " + resourceID + " (i.e 'field', 'grid')")
 				callback(undefined)
 			}
 			else
@@ -831,7 +865,7 @@ function buildFindExpenseReportQuery(desiredName, callback)
 			var reports = getEntities(result)
 			if (reports == undefined || reports.length == 0)
 			{
-				addReturnLog("warning", "No expense reports found found for this month (creating a new one)")
+				addReturnLog(STATUS_WARN, "No expense reports found found for this month (creating a new one)")
 				callback(-1)
 			}
 			else
@@ -867,16 +901,15 @@ function buildCreateExpenseReportRequest(desiredName, ticketDate, requesterID, c
 		xml2js(apiResponse, function(err, result) {
 			var expenseReports = getCreateEntities(result)
 
-
 			if (expenseReports == undefined || expenseReports.length == 0)
 			{
-				addReturnLog("error", "Failed to create new expense report.\nResponse:\n" + j(result))
+				addReturnLog(STATUS_ERR, "Failed to create new expense report.\nResponse:\n" + j(result))
 				callback(undefined)
 			}
 			else
 			{
-				addReturnLog("success", "Successfully created expense report")
-				callback(true)
+				addReturnLog(STATUS_GOOD, "Successfully created expense report")
+				callback(expenseReports[0].id[0])
 			}
 			//callback(result)
 		})
@@ -902,6 +935,7 @@ function buildAddExpenseItemsRequest(travelData, expenseReportID, callback) // N
 	var queryStringHead = "<create xmlns='http://autotask.net/ATWS/v1_6/'><Entities>"
 	var queryStringTail = "</Entities></create>"
 	var query = ""
+	var cachedItems = 0
 	for (var i = 0; i < travelData.length; i++)
 	{
 		var day = travelData[i]
@@ -927,23 +961,25 @@ function buildAddExpenseItemsRequest(travelData, expenseReportID, callback) // N
 			if (ticketDate == -1)
 				continue
 
-			if (cachedExpenseItemHashes[hashTrip(trip)])
+			if (cachedExpenseItemHashes[hashTrip(trip)] && !ignoreCache)
 			{
 				console.log("Ignoring cached expense")
+				cachedItems++
 				continue
 			}
 			cachedExpenseItemHashes[hashTrip(trip)] = true
+			var receiptAmount = parseFloat(trip.distance) * config.DOLLARS_PER_MILE
 
 			query +=	"<Entity xsi:type='ExpenseItem' xmlns:xsi='http://www.w3.org/2001/XMLSchema-instance'>" +
 						"<AccountID>" + associatedAccount + "</AccountID>" +
-						"<ReceiptAmount>" + parseFloat(trip.distance) * config.DOLLARS_PER_MILE + "</ReceiptAmount>" +
-						"<BillableToAccount>" + "true" + "</BillableToAccount>" +
+						"<ReceiptAmount>" + (Math.round(receiptAmount * 100) / 100) + "</ReceiptAmount>" +
+						"<BillableToAccount>" + "True" + "</BillableToAccount>" +
 						"<Description>" + TRAVEL_DESCRIPTION + " " + trip.fromName + " to " + trip.toName + "</Description>" +
 						"<Destination>" + trip.toName + "</Destination>" +
 						"<ExpenseCategory>" + 2 + "</ExpenseCategory>" + // 2 = Mileage
 						"<ExpenseDate>" + formatDate(ticketDate) + "</ExpenseDate>" +
 						"<ExpenseReportID>" + expenseReportID + "</ExpenseReportID>" +
-						"<HaveReceipt>" + "true" + "</HaveReceipt>" +
+						"<HaveReceipt>" + "True" + "</HaveReceipt>" +
 						"<Miles>" + trip.distance + "</Miles>" +
 						"<Origin>" + trip.fromName + "</Origin>" +
 						"<PaymentType>" + 14 + "</PaymentType>" + // Associated with the "Expense Type" field. 14 = "Other"
@@ -958,13 +994,26 @@ function buildAddExpenseItemsRequest(travelData, expenseReportID, callback) // N
 
 			if (expenseItems == undefined || expenseItems.length == 0) // This would happen if all expenses were logged
 			{
-				addReturnLog("error", "Failed to create new expense items. Response:\n" + JSON.stringify(result))
-				callback(undefined)
+				if (cachedItems > 0)
+				{
+					addReturnLog(STATUS_ERR, "Skipped " + cachedItems + " previously generated expense items by default. You can change this behavior in the extension's settings")
+					callback(undefined)
+				}
+				else
+				{
+					//console.log("Query: " + query)
+					addReturnLog(STATUS_ERR, "Failed to create new expense items. Response:\n" + JSON.stringify(result))
+					callback(undefined)
+				}
 			}
 			else
 			{
+				if (cachedItems > 0)
+				{
+					addReturnLog(STATUS_WARN, "Ignoring " + cachedItems + " previously generated expense items by default. You can change this behavior in the extension's settings")
+				}
 				//console.log(j(result))
-				addReturnLog("success", "Created expense items")
+				addReturnLog(STATUS_GOOD, "Created " + expenseItems.length + " expense items")
 				callback("true")
 			}
 			//callback(result)
@@ -989,8 +1038,14 @@ function buildAddExpenseItemsRequest(travelData, expenseReportID, callback) // N
 // TaskID
 function buildAddTravelTimeRequest(travelData, resourceID, callback)
 {
-	buildResourceRoleQuery(resourceID, function(apiResponse) {
-		var entities = getEntities(apiResponse)
+	buildResourceRoleQuery(resourceID, function(entities) {
+		if (entities == undefined || entities.length == 0)
+		{
+			addReturnLog(STATUS_ERR, "Unable to find a role (i.e 'field', 'grid') for resource: " + resourceID)
+			callback(undefined)
+			return
+		}
+
 		var resourceIDs = []
 		//console.log(j(entities))
 		for (var i = 0; i < entities.length; i++)
@@ -998,21 +1053,21 @@ function buildAddTravelTimeRequest(travelData, resourceID, callback)
 			resourceIDs.push(entities[i].RoleID[0]._)
 		}
 		
-		buildRolesQuery(resourceIDs, function(apiResponse) {
-			var entities = getEntities(apiResponse)
+		buildRolesQuery(resourceIDs, function(roles) {  // A single resource can have multiple roles so loop through them
 			var roleID = -1
-			for (var i = 0; i < entities.length; i++)
+			for (var i = 0; i < roles.length; i++)
 			{
-				if (entities[i].Name[0]._.indexOf("Field") >= 0)  // The resource is a field technician
+				if (roles[i].Name[0]._.indexOf("Field") >= 0)  // The resource is a field technician
 				{
-					roleID = entities[i].id[0]
-					i = entities.length
+					roleID = roles[i].id[0]
+					i = roles.length
 				}
 			}
 
 			if (roleID == -1)
 			{
-				callback("You are not a Field Technician!")
+				addReturnLog(STATUS_ERR, "You are not a field technician!")
+				callback(undefined)
 			}
 			else
 			{
@@ -1040,7 +1095,7 @@ function buildAddTravelTimeRequest(travelData, resourceID, callback)
 
 						if (trip.totalTimeHours == 0)
 						{
-							addReturnLog("warning", "Skipping time entry for the trip from " + trip.fromName + " to " + trip.toName + " on " + new Date(trip.startTime).toLocaleString() + "\nReason: travel time has been calculated as 0 minutes")
+							addReturnLog(STATUS_WARN, "Skipping time entry for the trip from " + trip.fromName + " to " + trip.toName + " on " + new Date(trip.startTime).toLocaleString() + "\nReason: travel time has been calculated as 0 minutes")
 							continue
 						}
 						//console.log("Trip before: " + JSON.stringify(travelData][i][j]))
@@ -1050,7 +1105,7 @@ function buildAddTravelTimeRequest(travelData, resourceID, callback)
 							associatedAccount = trip.fromAccountID
 						if (associatedAccount == -1)
 						{
-							addReturnLog("warning", "Unable to find the accounts " + trip.fromName + " and " + trip.toName)
+							addReturnLog(STATUS_WARN, "Unable to find the accounts " + trip.fromName + " and " + trip.toName)
 							continue
 						}
 
@@ -1078,7 +1133,7 @@ function buildAddTravelTimeRequest(travelData, resourceID, callback)
 
 						if (trip.taskID == undefined) // Don't log this, give an error warning
 						{
-							addReturnLog("warning", "Unable to find the travel task for the annual project associated with: " + associatedAccount)
+							addReturnLog(STATUS_WARN, "Unable to find the travel task for the annual project associated with: " + associatedAccount)
 							continue
 						}
 
@@ -1095,7 +1150,7 @@ function buildAddTravelTimeRequest(travelData, resourceID, callback)
 						if (ticketDate == -1)
 							continue
 
-						if (cachedTimeEntryHashes[hashTrip(trip)])
+						if (cachedTimeEntryHashes[hashTrip(trip)] && !ignoreCache)
 						{
 							console.log("Ignoring cached trip")
 							continue
@@ -1123,7 +1178,7 @@ function buildAddTravelTimeRequest(travelData, resourceID, callback)
 						var timeEntries = getCreateEntities(result)
 						if (timeEntries == undefined || timeEntries.length == 0)
 						{
-							addReturnLog("error", "No travel time entries create. Response:\n" + result)
+							addReturnLog(STATUS_ERR, "No travel time entries create. Response:\n" + result)
 							callback(undefined)
 						}
 						else
@@ -1161,10 +1216,16 @@ function getThresholdAndUsageInfo(callback)
 	}, "getThresholdAndUsageInfo", true) // Case sensitive
 }
 
-var returnMessage = [] 
-function addReturnLog(messageStatus, message)
+var returnMessage = {} 
+function addReturnLog(messageStatus, message, userID = "null")
 {
-	returnMessage.push({"status": messageStatus, "message": message})
+	if (!returnMessage[userID])
+	{
+		returnMessage[userID] = []
+	}
+	
+	// TODO: Make each response unique per user
+	returnMessage[userID].push({"status": messageStatus, "message": message})
 }
 
 //Note: These values are actually TimeEntries from the API, not technically tickets. Just easier to understand this way I think
@@ -1172,7 +1233,7 @@ function parseTicketsInformation(tickets, callback)
 {
 	if (tickets == undefined || tickets.length == 0)
 	{
-		addReturnLog("error", "No tickets were returned")
+		addReturnLog(STATUS_ERR, "No tickets were returned")
 		callback(undefined)
 	}
 
@@ -1430,8 +1491,8 @@ function parseDistanceMatrix(matrix, addresses, callback)
 
 function authenticateUserRequest(postParams, resourceID, callback)
 {
-	var email = clean(postParams["email"])
-	var address = clean(postParams["homeAddress"])
+	var email = clean(postParams["emailAddress"])
+	var homeAddress = clean(postParams["homeAddress"])
 	var authToken = clean(postParams["authToken"])
 	var mostRecentTickets = postParams["recentTickets"]
 	var mostRecentExpenseReports = postParams["recentExpenseReports"]
@@ -1439,32 +1500,32 @@ function authenticateUserRequest(postParams, resourceID, callback)
 
 	if (email == undefined)
 	{
-		addReturnLog("error", "User email address ('email'): <i>undefined<i>")
+		addReturnLog(STATUS_ERR, "User email address ('email'): <i>undefined<i>")
 		callback(undefined)
 		return
 	}
-	if (address == undefined)
+	if (homeAddress == undefined)
 	{
-		addReturnLog("error", "User home address ('homeAddress'): <i>undefined<i>")
+		addReturnLog(STATUS_ERR, "User home address ('homeAddress'): <i>undefined<i>")
 		callback(undefined)
 		return
 	}
-	if (authToken == undefined)
+	if (authToken == undefined && false) // TODO : temp bypass
 	{
-		addReturnLog("error", "No Autotask auth token ('authToken')) has been provided")
+		addReturnLog(STATUS_ERR, "No Autotask auth token ('authToken')) has been provided")
 		callback(undefined)
 		return
 	}
 	if (rewriteData == undefined)
 	{
-		addReturnLog("error", "You must specify whether you want to rewrite ticket data even if it has been previously uploaded ('writeAgain')")
+		addReturnLog(STATUS_ERR, "You must specify whether you want to rewrite ticket data even if it has been previously uploaded ('writeAgain')")
 		callback(undefined)
 		return
 	}
 
-		ignoreCache = rewriteData
+	ignoreCache = rewriteData
 
-	if (emailToAuthTokenMap[email]) == authToken)
+	if (emailToAuthTokenMap[email] == authToken)
 	{
 		callback(email, homeAddress)
 		return
@@ -1483,19 +1544,19 @@ function authenticateUserRequest(postParams, resourceID, callback)
 
 		if (expenseReportNames == undefined || expenseReportPeriodsEnding == undefined || expenseReportAmountsDue == undefined)
 		{
-			addReturnLog("error", "Misformed POST data")
+			addReturnLog(STATUS_ERR, "Misformed POST data")
 			callback(undefined)
 			return
 		}
 		if  (expenseReportNames.length == 0 || expenseReportPeriodsEnding.length == 0 || expenseReportAmountsDue.length == 0)
 		{
-			addReturnLog("error", "Misformed POST data")
+			addReturnLog(STATUS_ERR, "Misformed POST data")
 			callback(undefined)
 			return
 		}
 		if  (expenseReportNames.length != expenseReportPeriodsEnding.length || expenseReportPeriodsEnding.length != expenseReportAmountsDue)
 		{
-			addReturnLog("error", "Misformed POST data")
+			addReturnLog(STATUS_ERR, "Misformed POST data")
 			callback(undefined)
 			return
 		}
@@ -1508,15 +1569,15 @@ function authenticateUserRequest(postParams, resourceID, callback)
 
 		for (var i = 0; i < expenseReportNames.length; i++)
 		{
-			var query1 +=  "<expression op='equals'>" + expenseReportNames[i] + "</expression>"
-			var query2 += "<expression op='equals'>" + expenseReportPeriodsEnding[i] + "</expression>"
-			var query3 += "<expression op='equals'>" + expenseReportAmountsDue[i] + "</expression>"
+			query1 +=  "<expression op='equals'>" + expenseReportNames[i] + "</expression>"
+			query2 += "<expression op='equals'>" + expenseReportPeriodsEnding[i] + "</expression>"
+			query3 += "<expression op='equals'>" + expenseReportAmountsDue[i] + "</expression>"
 		}
 		query1 += "</field>"
 		query2 += "</field>"
 		query3 += "</field>"
 
-		var query4 += "<field>SubmitterID<expression op='equals'>" + resourceID + "</expression></field>"
+		var query4 = "<field>SubmitterID<expression op='equals'>" + resourceID + "</expression></field>"
 
 		query = query1 + query2 + query3 + query4
 		queryStringTail = "</query></queryxml>]]></sXML></query>"
@@ -1528,19 +1589,19 @@ function authenticateUserRequest(postParams, resourceID, callback)
 
 		if (ticketNumbers== undefined || ticketTimesWorked == undefined)
 		{
-			addReturnLog("error", "Misformed POST data")
+			addReturnLog(STATUS_ERR, "Misformed POST data")
 			callback(undefined)
 			return
 		}
 		if  (ticketNumbers.length == 0 || ticketTimesWorked.length == 0)
 		{
-			addReturnLog("error", "Misformed POST data")
+			addReturnLog(STATUS_ERR, "Misformed POST data")
 			callback(undefined)
 			return
 		}
 		if  (ticketNumbers.length != ticketTimesWorked.length)
 		{
-			addReturnLog("error", "Misformed POST data")
+			addReturnLog(STATUS_ERR, "Misformed POST data")
 			callback(undefined)
 			return
 		}
@@ -1552,7 +1613,7 @@ function authenticateUserRequest(postParams, resourceID, callback)
 
 		for (var i = 0; i < expenseReportNames.length; i++)
 		{
-			var query1 +=  "<expression op='equals'>" + ticketNumbers[i] + "</expression>"
+			query1 +=  "<expression op='equals'>" + ticketNumbers[i] + "</expression>"
 			//var query2 += "<expression op='equals'>" + expenseReportPeriodsEnding[i] + "</expression>"
 			//var query3 += "<expression op='equals'>" + expenseReportAmountsDue[i] + "</expression>"
 		}
@@ -1560,7 +1621,7 @@ function authenticateUserRequest(postParams, resourceID, callback)
 		query2 += "</field>"
 		query3 += "</field>"
 
-		var query4 += "<field>SubmitterID<expression op='equals'>" + resourceID + "</expression></field>"
+		var query4 = "<field>SubmitterID<expression op='equals'>" + resourceID + "</expression></field>"
 
 		query = query1// + query2 + query3 + query4
 		queryStringTail = "</query></queryxml>]]></sXML></query>"
@@ -1568,7 +1629,7 @@ function authenticateUserRequest(postParams, resourceID, callback)
 	}
 	else
 	{
-		addReturnLog("error", "No relevant travel data given to server")
+		addReturnLog(STATUS_ERR, "No relevant travel data given to server")
 		callback(undefined)
 		return
 	}
@@ -1579,8 +1640,8 @@ function authenticateUserRequest(postParams, resourceID, callback)
 
 			if (entities== undefined || entities.length == 0 || entities.length != desiredResponseLength)
 			{
-				addReturnLog("error", "It seems like you are trying to impersonate someone! This request has been logged.") // No it hasn't :)
-				addReturnLog("warning", "If this is an error, and it persists, please contact <b>Jacob Fakult<b>")
+				addReturnLog(STATUS_ERR, "It seems like you are trying to impersonate someone! This request has been logged.") // No it hasn't :)
+				addReturnLog(STATUS_WARN, "If this is an error, and it persists, please contact <b>Jacob Fakult<b>")
 				callback(undefined)
 			}
 			else
@@ -1653,6 +1714,10 @@ module.exports =
 
 	getDistanceData : getDistanceData,
 
-	authenticateUserRequest : authenticateUserRequest
-	
+	authenticateUserRequest : authenticateUserRequest,
+
+	buildGenericQuery : buildGenericQuery,
+
+	clean : clean
+
 }; // Closing bracket of module exports
