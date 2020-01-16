@@ -97,54 +97,63 @@ http.createServer(function (request, nodeResponse)
 		}
 		else if (request.url == "/ticketSearch")
 		{
-			apiTools.buildGenericQuery("Account", ["AccountName"], [[{"op": "contains", "val": "Old Brook"}]], function(entities) {
-				if (entities == undefined || entities.length == 0)
+			apiTools.buildGenericQuery(null, "Account", ["AccountName"], [[{"op": "contains", "val": "Old Brook "}]], function(accounts) {
+				if (accounts == undefined || accounts.length == 0)
 				{
 					nodeResponse.end("No accounts returned")
 					return
 				}
 
-				console.log(JSON.stringify(entities, null, 4))
-				var accountID = entities[0].AccountID[0].id[0]
-				var contractID = entities[0].ContractID[0].id[0]
+				//console.log(JSON.stringify(accounts, null, 4))
+				var accountID = accounts[0].id[0]
 
-				// We are querying for tickets
-				var entity = "Ticket"
-
-				// Fields uses an AND search, so Description matches the expressions AND the ContractID matches its corresponding expressions
-				var fields = ["Description", "ContractID"]
-
-				//                       "Description contains 'IAP 205'"         "ContractID  equals contractIDVal"
-				var expressions = [[{"op": "contains", "val": "IAP 205"}], [{"op": "equals", "val": contractID}]]
-				apiTools.buildGenericRequest(entity, fields, expressions, function(tickets) {
-					if (tickets == undefined || tickets.length == 0)
+				apiTools.buildGenericQuery(null, "Contract", ["AccountID"], [[{"op": "equals", "val": accountID}]], function(contracts) {
+					if (contracts == undefined || contracts.length == 0)
 					{
-						nodeResponse.end("No tickets found")
+						nodeResponse.end("No contracts found for account: " + accountID)
 						return
 					}
 
-					res = "Found " + tickets.length + " tickets!"
-					for (var i = 0; i < tickets.length; i++)
-					{
-						var ticket = tickets[i]
+					var contractID = contracts[0].id[0]
 
-						var ticketNumber = ticket.ticketNumber[0]._
-						var ticketTitle = ticket.title[0]._
-						var createDate = ticket.CreateDate[0]._
-						var resolvedDate = ticket.ResolvedDateTime[0]._
-						var discription = ticket.Description[0]._
+					// We are querying for tickets
+					var entity = "Ticket"
 
-						res += "Ticket Number: " + ticketNumber
-						res += "Ticket Title: " + ticketTitle
-						res += "Ticket Description: " + description
-						res += "Created Date: " + createDate
-						res += "Resolved Date: " + resolvedDate
+					// Fields uses an AND search, so Description matches the expressions AND the ContractID matches its corresponding expressions
+					var fields = ["Description", "ContractID"]
 
-						if (i > 0 && i < (tickets.length - 1))
-							res += "\n\n"
-					}
+					//                       "Description contains 'IAP 205'"         "ContractID  equals contractIDVal"
+					var expressions = [[{"op": "contains", "val": " 205"}], [{"op": "equals", "val": contractID}]]
+					apiTools.buildGenericQuery(null, entity, fields, expressions, function(tickets) {
+						if (tickets == undefined || tickets.length == 0)
+						{
+							nodeResponse.end("No tickets found")
+							return
+						}
 
-					nodeResponse.end(res)
+						res = "Found " + tickets.length + " tickets!"
+						for (var i = 0; i < tickets.length; i++)
+						{
+							var ticket = tickets[i]
+	
+							var ticketNumber = ticket.ticketNumber[0]._
+							var ticketTitle = ticket.title[0]._
+							var createDate = ticket.CreateDate[0]._
+							var resolvedDate = ticket.ResolvedDateTime[0]._
+							var discription = ticket.Description[0]._
+	
+							res += "Ticket Number: " + ticketNumber
+							res += "Ticket Title: " + ticketTitle
+							res += "Ticket Description: " + description
+							res += "Created Date: " + createDate
+							res += "Resolved Date: " + resolvedDate
+	
+							if (i > 0 && i < (tickets.length - 1))
+								res += "\n\n"
+						}
+	
+						nodeResponse.end(res)
+					})
 				})
 			})
 		}
@@ -178,7 +187,7 @@ http.createServer(function (request, nodeResponse)
 
 	// Use these functions for non-user related API requests (i.e api usage, field info queries, etc)
 	
-	/*apiTools.getFieldInfo("Role", function(apiResponse) { // Use this field to query picklist options
+	/*apiTools.getFieldInfo("Role", null, function(apiResponse) { // Use this field to query picklist options
 		//console.log(apiResponse)
 		xml2js(apiResponse, function(err, result) {
 			nodeResponse.end(apiTools.j(result))
@@ -193,7 +202,7 @@ http.createServer(function (request, nodeResponse)
 			nodeResponse.end(apiTools.j(result))
 		})
 		//nodeResponse.end(apiTools.j(apiResponse))
-	})
+	}, null)
 	return*/
 }).listen(8001);
 
@@ -247,6 +256,7 @@ function uploadData(postParams, request, nodeResponse)
  	apiTools.buildResourceQueryRequest(emailAddress, function(resourceID) {
  	 	if (resourceID == undefined)
 		{
+			resourceID = null
 			sendResponse(nodeResponse, resourceID)
 			return
 		}
@@ -268,7 +278,7 @@ function uploadData(postParams, request, nodeResponse)
 		  }
  
 	// Given the tickets object, do some more querying
- 	   apiTools.parseTicketsInformation(tickets, function(ticketsData) {    // ticketData is the main data structure. It is an array of time entries
+ 	   apiTools.parseTicketsInformation(tickets, resourceID, function(ticketsData) {    // ticketData is the main data structure. It is an array of time entries
 		   								// As each function collects more info, it will be added here
 		   if (ticketsData == undefined)
 		   {
@@ -284,7 +294,7 @@ function uploadData(postParams, request, nodeResponse)
 		   }
 
 	// Now that we have ticketData (an array of time entries), collect information on all the schools associated with them. Returns school accountIDs
-	    apiTools.buildContractIDsQueryRequest(contractIDs, function(accountIDs) {
+	    apiTools.buildContractIDsQueryRequest(contractIDs, resourceID, function(accountIDs) {
 		    if (accountIDs == undefined)
 		    {
 			    sendResponse(nodeResponse, resourceID)
@@ -292,7 +302,7 @@ function uploadData(postParams, request, nodeResponse)
 		    }
 
 	// Now that we have the accountIDs, get data associated with them, including address, name, and a few other things
-	     apiTools.buildAccountIDsQueryRequest(accountIDs, function(accountsData) {
+	     apiTools.buildAccountIDsQueryRequest(accountIDs, resourceID, function(accountsData) {
 		     if (accountsData == undefined)
 		     {
 			     sendResponse(nodeResponse, resourceID)
@@ -325,7 +335,7 @@ function uploadData(postParams, request, nodeResponse)
 			       console.log("Generating travel times")
 
 			       // Given the schools that we are going, find the ID of each school's annual project so we can add our travel times
-			       apiTools.buildFindTravelProjectQuery(accountIDs, function(projectIDs) {
+			       apiTools.buildFindTravelProjectQuery(accountIDs, resourceID, function(projectIDs) {
 	        	               if (projectIDs == undefined)
 				       {
 					       sendResponse(nodeResponse, resourceID)
@@ -334,7 +344,7 @@ function uploadData(postParams, request, nodeResponse)
 			       
 				// Find the tasks associated with those annual projects
 				// Note the return value here is cached, that is why it is not passed into buildAddTravelTimeRequest
-			        apiTools.buildFindTravelProjectTaskQuery(projectIDs, function(taskIDs) {
+			        apiTools.buildFindTravelProjectTaskQuery(projectIDs, resourceID, function(taskIDs) {
 		     	                if (taskIDs == undefined)
 					{
 						sendResponse(nodeResponse, resourceID)
@@ -375,13 +385,14 @@ const STATUS_WARN = 1
 const STATUS_ERR  = 2
 const STATUS_MAP = ["Success", "Warning", "Error"]
 
-function sendResponse(nodeResponse, userID = "null")
+// Differentiate between each individual resource before returning responses so that simultanious transactions to the server are opaque to the client
+function sendResponse(nodeResponse, resourceID = "null")
 {
-	console.log("Sending response: " + apiTools.j(apiTools.returnMessage[userID]))
+	console.log("Sending response: " + resourceID + " " + apiTools.j(apiTools.returnMessage))
 
-	nodeResponse.end(JSON.stringify(apiTools.returnMessage[userID], null, 4))
+	nodeResponse.end(JSON.stringify(apiTools.returnMessage[resourceID], null, 4))
 	
-	apiTools.returnMessage[userID] = []
+	apiTools.returnMessage[resourceID] = []
 	return
 }
 

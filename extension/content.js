@@ -1,3 +1,8 @@
+/*
+ * This is the content script for the Vinson Autotask API integration chrome extension
+ * Essentially its purpose is to request javascript files from the node server hosting the API integration code
+ * Further explanation of uses is explained in the server-side documentation
+ */
 insertAutomationHTML()
 
 function insertAutomationHTML()

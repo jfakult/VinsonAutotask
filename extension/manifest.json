@@ -1,7 +1,7 @@
 {
 	"version": "1.0",
 	"manifest_version": 2, 
-	"name": "Vinson Autotask API Integrations", 
+	"name": "Vinson Autotask API Integration", 
 	"description": "Adds some extra functionality to Autotask including autofilling fields for new tickets and auto-creating travel times and expense reports",
 	"content_scripts": [{
 		"matches": ["https://*.autotask.net/*"],

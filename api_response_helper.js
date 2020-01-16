@@ -1,3 +1,9 @@
+/*
+ * This script inserts HTML into the autotask website that allows users to send requests to the server hosting the API integration code
+ * It inserts two buttons, the "Automatic Entry" button and the "Update User Information" Button
+ * Both should be pretty self-explanatory
+ */
+
 insertAutomationHTML()
 
 const STATUS_GOOD = 0
@@ -5,6 +11,9 @@ const STATUS_WARN = 1
 const STATUS_ERR  = 2
 const STATUS_MAP = ["Success", "Warning", "Error"]
 
+var serverIP = "127.0.0.1:8001"
+
+// Helpful prototypes
 Element.prototype.appendAfter = function (element) {
 	element.parentNode.insertBefore(this, element.nextSibling)
 }
@@ -16,16 +25,19 @@ Element.prototype.remove = function() {
 var autoGenerateButton = undefined
 var mode = ""
 
+// Determines which page we are on, and inserts the necessary HTML
 function insertAutomationHTML()
 {
 	if (window.top === window.self) return // Only continue if we are loading an iframe
 
 	if (window.location.href.indexOf("expenseReports") >= 0)
 	{
+		// The user is looking at  their expense reports
 		insertExpenseReportHTML()
 	}
 	else if (window.location.href.indexOf("wrkEntry") >= 0)  // Whitelist any other urls here
 	{
+		// The user is looking at the timesheet
 		insertTimesheetHTML()
 	}
 }
@@ -34,11 +46,13 @@ function insertTimesheetHTML()
 {
 	var form = document.getElementById("form1")
 
+	// Make sure we are in the right frame
 	if (form == undefined || form == null)
 		return
 
 	var buttonBar = form.parentElement
 
+	// Create the button and style it to match the theme of the page
 	var autoGenerateButton = '<a id="autoGenerateButton" class="ImgLink" href="#" title="Upload Report">Auto Generate Travel Times</a>'
 
 	buttonBar.insertAdjacentHTML("afterbegin", autoGenerateButton)
@@ -63,11 +77,13 @@ function insertTimesheetHTML()
 		marginBottom: "10px"
 	})
 	
+	// Create the update user button
 	var updateInfoButton = document.getElementById("autoGenerateButton").cloneNode(true)
 	updateInfoButton.innerHTML = "Update user information"
 	updateInfoButton.setAttribute("id", "updateInfoButton")
 	autoGenerateButton.insertAdjacentHTML("afterend", updateInfoButton.outerHTML)
 
+	// Bind actions to the buttonns
 	document.getElementById("autoGenerateButton").onclick = autoGenerateTravelTimes
 	document.getElementById("updateInfoButton").onclick = updateUserInfo
 }
@@ -117,6 +133,8 @@ function insertExpenseReportHTML()
 	document.getElementById("updateInfoButton").onclick = updateUserInfo
 }
 
+// Uses an HTML "prompt" to update the user's info
+// Stores everything in localStorage.API object
 function updateUserInfo()
 {
 	var email = ""
@@ -167,9 +185,12 @@ function autoGenerateExpenseReport()
 	var sibling = document.getElementById("expenseGrid")
 	var apiData = JSON.parse(localStorage.API)
 
+	// Start the loading splash
 	var intervalKill = showLoadingSplash()
+	
+	// Send server request
 	$.ajax({
-		url: "http://127.0.0.1:8001/generateExpenseReports",
+		url: serverIP + "/generateExpenseReports",
 		//url: "http://10.180.8.116:8001/generateExpenseReports",
 
 		type: "post",
@@ -177,6 +198,7 @@ function autoGenerateExpenseReport()
 		//url: "http://127.0.0.1:8001/generateExpenseReports",
 		success: function(response)
 		{
+			// Clear the loading splash and reset it
 			clearInterval(intervalKill)
 			var splashBox = document.getElementById("splashBox")
 			$(splashBox).animate({
@@ -247,6 +269,7 @@ function autoGenerateTravelTimes()
 }
 
 var splashImages = [""]
+
 var splashMessages = [ "Sending Authentication Information...", "Querying user tickets...", "Extrapolating Travel Data...", "Getting Google Directions API travel data...", "Uploading results..." ]
 function showLoadingSplash()
 {
@@ -288,6 +311,7 @@ function showLoadingSplash()
 
 	splashMessageIndex++
 
+	// Ensure that the splash box can be reset immediately upon any errors
 	var splashKill = setInterval(function incrementSplash() {
 		if (splashMessageIndex < splashMessages.length)
 		{
@@ -314,6 +338,8 @@ function showLoadingSplash()
 	return splashKill
 }
 
+// Display server response graphically
+// Insert some HTML to do it
 function showResultMessage(response, messageSibling, moveElement, elementPosition)
 {
 	//console.log("response: " + response)
