@@ -2,7 +2,7 @@
 // API Docs: https://github.com/opendns/autotask-php/files/2789940/T_WebServicesAPIv1_6.pdf
 
 /*
- * This script is called by api_relay_server.js. api_relay_server.js is the main node server.
+ * This script is called by api_relay_server.js, the main node server.
  * This script just contains the code needed to generate and interpret API requests/responses.
  * 
  * API Notes:
@@ -12,6 +12,8 @@
  * Travel project times are submitted as a ("Project"???) (pg. 205)
  * A "TimeEntry" is used for general or regular time (pg. 325)
 */
+
+// TODO : For administrators. Travel times will stop working after August until the new (e.g 2020-2021 Annual Projects) projects are created
 
 const https = require("https")
 var config = require("./config.js")
@@ -155,6 +157,74 @@ function roundToNearest15(startTime, endTime, inc = 4) // Round the hour into "i
 
 	return roundedHours
 }
+
+// Returns, as the name implies, the longest substring contained within bothe strings
+// This is used for address matching (the returned addresses from the Google Distance API are formatted differently than what is stored in the Autotask API
+// This method has proven to work properly with every school I have tested
+function longestCommonSubstring(a, b)
+{
+	let len = b.length, originalLen = b.length;
+	do
+	{
+		for ( let i = 0; i <= originalLen - len; i++ )
+		{
+			let needle = b.substr( i, len );
+			if ( a.indexOf( needle ) !== -1 ) return needle;
+		}
+	} while ( len-- > 0 );
+
+	return "";
+}
+
+// Given an address and an array of addresses, return the one with the longest matching substring
+// In other words, "figure out which index this address is at, even if it does not match the entry perfectly"
+// Uses the longestCommonSubstring function above for help
+function findAddress(address, addresses)
+{
+	address = address.toLowerCase()
+	address = address.replaceAll(",", "").replaceAll("street", "st").replaceAll("road", "rd").replaceAll("avenue", "ave")
+	//console.log("Checking: " + address)
+	var longestSubstringIndex = 0
+	var longestSubstring = ""
+
+	for (var i = 0; i < addresses.length; i++)
+	{
+		var a = addresses[i].toLowerCase()
+		a = a.replaceAll(",", "").replaceAll("street", "st").replaceAll("road", "rd").replaceAll("avenue", "ave")
+
+		//console.log("Comparing: " + a)
+
+		var substring = longestCommonSubstring(a, address)
+
+		//console.log("subString: " + substring)
+
+		if (substring.length > longestSubstring.length)
+		{
+			longestSubstring = substring
+			longestSubstringIndex = i
+		}
+	}
+
+	//console.log("Returning: " + longestSubstringIndex + "\n\n\n")
+
+	return [address, addresses[longestSubstringIndex]]
+}
+
+// Useful for working with Javascript's native Set object (used with address matrix results to ensure that there are no duplicates
+Set.prototype.toArray = function()
+{
+	var arr = []
+	var iter = this.values()
+	var val = iter.next()
+	while (!val.done)
+	{
+		arr.push(val.value)
+		val = iter.next()
+	}
+
+	return arr
+}
+
 
 
 
@@ -643,9 +713,7 @@ function extrapolateTravelData(ticketsData, accountsData, homeAddress, resourceI
 		tripHome.arriveTime = -1
 		tripHome.totalTimeHours = -1
 
-		//log("Trip3", j(tripHome))
-		travelForDay.push(tripHome) // Should this be here or outside of this if statement
-
+		travelForDay.push(tripHome)
 		travelData.push(travelForDay)
 	}
 
@@ -653,57 +721,12 @@ function extrapolateTravelData(ticketsData, accountsData, homeAddress, resourceI
 	callback(travelData)
 }
 
-function longestCommonSubstring(a, b)
-{
-	let len = b.length, originalLen = b.length;
-	do
-	{
-		for ( let i = 0; i <= originalLen - len; i++ )
-		{
-			let needle = b.substr( i, len );
-			if ( a.indexOf( needle ) !== -1 ) return needle;
-		}
-	} while ( len-- > 0 );
-
-	return "";
-}
-
-// Given an address and an array of addresses, return the one with the longest matching substring
-function findAddress(address, addresses)
-{
-	address = address.toLowerCase()
-	address = address.replaceAll(",", "").replaceAll("street", "st").replaceAll("road", "rd").replaceAll("avenue", "ave")
-	//console.log("Checking: " + address)
-	var longestSubstringIndex = 0
-	var longestSubstring = ""
-
-	for (var i = 0; i < addresses.length; i++)
-	{
-		var a = addresses[i].toLowerCase()
-		a = a.replaceAll(",", "").replaceAll("street", "st").replaceAll("road", "rd").replaceAll("avenue", "ave")
-
-		//console.log("Comparing: " + a)
-
-		var substring = longestCommonSubstring(a, address)
-
-		//console.log("subString: " + substring)
-
-		if (substring.length > longestSubstring.length)
-		{
-			longestSubstring = substring
-			longestSubstringIndex = i
-		}
-	}
-
-	//console.log("Returning: " + longestSubstringIndex + "\n\n\n")
-
-	return [address, addresses[longestSubstringIndex]]
-}
-
-// Split this up into a function for expenses and travel times 
 var months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" ]
 
-// Still needs error reporting
+/*
+ * Despite the confusing name, this function is the wrapper function for uploading travel data into the API to create *expense items*
+ * Before it can do that, it will first check to see if an expense report for the current month exists (or create one if it doesn't)
+ */
 function buildUploadDataRequest(travelData, requesterID, callback)
 {
 	if (travelData.length == 0 || travelData[0].length == 0)
@@ -726,7 +749,9 @@ function buildUploadDataRequest(travelData, requesterID, callback)
 
 	desiredName = EXPENSE_TITLE + " for " + expenseMonth + " " + expenseYear
 
+	// Try to find the an existing expense report
 	buildFindExpenseReportQuery(desiredName, requesterID, function(expenseReportID) {        // Technically this may cause issues for the edge case
+		// If no report was found, create one
 		if (expenseReportID == -1)					         // Where the user creates expense reports for the entire year
 		{								         // AND calls them by the exact same name as this program wants to call them
 			buildCreateExpenseReportRequest(desiredName, endOfFirstWeek, requesterID, function(newExpenseReportID) {
@@ -739,6 +764,7 @@ function buildUploadDataRequest(travelData, requesterID, callback)
 		}
 		else
 		{
+			// We found the expense report, add the expense items to it
 			buildAddExpenseItemsRequest(travelData, expenseReportID, requesterID, function(apiResponse) {
 				callback(apiResponse)
 			})
@@ -746,52 +772,189 @@ function buildUploadDataRequest(travelData, requesterID, callback)
 	})
 }
 
-function buildFindTravelProjectTaskQuery(projectIDs, resourceID, callback)
+// Looks for an expense report with the desired name. Returns -1 if not found
+function buildFindExpenseReportQuery(desiredName, resourceID, callback)
 {
-	var taskIDs = []
+	var reportID = -1
 
-	var queryStringHead = "<query xmlns='http://autotask.net/ATWS/v1_6/'><sXML><![CDATA[<queryxml><entity>Task</entity><query>"//<field>ProjectID"
+	var queryStringHead = "<query xmlns='http://autotask.net/ATWS/v1_6/'><sXML><![CDATA[<queryxml><entity>ExpenseReport</entity><query><field>name"
 	var queryStringTail = "</field></query></queryxml>]]></sXML></query>"
-	
-	var query = ""
-	/*for (var i = 0; i < projectIDs.length; i++)
-	{
-		query += "<expression op='equals'>" + projectIDs[i] + "</expression>"
-	}*/
 
-	query += "<field>Title"
-	query += "<expression op='equals'>" + "Travel Time" + "</expression>"
+	var query = "<expression op='equals'>" + desiredName + "</expression>"
 
 	sendRequest(queryStringHead + query + queryStringTail, resourceID, function(apiResponse) {
 		xml2js(apiResponse, function(err, result) {
-			var projects = getEntities(result)
-			if (projects == undefined || projects.length == 0)
+			var reports = getEntities(result)
+			if (reports == undefined || reports.length == 0)
 			{
-				addReturnLog(STATUS_ERR, "No tasks found for annual projects with IDs: " + j(projectIDs), resourceID)
-				callback(undefined)
+				addReturnLog(STATUS_WARN, "No expense reports found found for this month (creating a new one)", resourceID)
+				callback(-1)
 			}
 			else
 			{
-				for (var i = 0; i < projects.length; i++)
-				{
-					if (projectIDs.indexOf(projects[i].ProjectID[0]._) >= 0)
-					{
-						annualProjectIDToTaskIDMap[projects[i].ProjectID[0]._] = projects[i].id[0]
-						taskIDs.push(projects[i].id[0])
-					}
-				}
-				//console.log(j(result))
-				callback(taskIDs)
+				reportID = reports[0].id[0]
+
+				callback(reportID)
 			}
 		})
 	})
 
 }
 
+// Creates a new expense report with the desired name
+function buildCreateExpenseReportRequest(desiredName, ticketDate, requesterID, callback)
+{
+	var monthEndDate = new Date(ticketDate)   // Set the expense report to end at the end of the month
+	monthEndDate.setMonth(monthEndDate.getMonth() + 1) // Set the date to next month
+	monthEndDate.setDate(0)      // This will wrap the date to the last day of the previous month
+	monthEndDate.setHours(23)    // just before midnight
+	monthEndDate.setMinutes(59)  // "
+	monthEndDate.setSeconds(59)  // "
+
+	//console.log("Week ending: " + ticketDate + " " + monthEndDate + " " + formatDate(monthEndDate))
+	var queryStringHead = "<create xmlns='http://autotask.net/ATWS/v1_6/'><Entities>"
+	var queryStringTail = "</Entities></create>"
+	var query =     "<Entity xsi:type='ExpenseReport' xmlns:xsi='http://www.w3.org/2001/XMLSchema-instance'>" +
+			"<Name>" + desiredName + "</Name>" +
+			"<SubmitterID>" + requesterID + "</SubmitterID>" +
+			"<WeekEnding>" + formatDate(monthEndDate) + "</WeekEnding>"  +
+			"</Entity>"
+
+	sendRequest(queryStringHead + query + queryStringTail, requesterID, function(apiResponse) {
+		xml2js(apiResponse, function(err, result) {
+			var expenseReports = getCreateEntities(result)
+
+			if (expenseReports == undefined || expenseReports.length == 0)
+			{
+				addReturnLog(STATUS_ERR, "Failed to create new expense report.\nResponse:\n" + j(result), requesterID)
+				callback(undefined)
+			}
+			else
+			{
+				addReturnLog(STATUS_GOOD, "Successfully created expense report", requesterID)
+				callback(expenseReports[0].id[0])
+			}
+			//callback(result)
+		})
+	}, "create")
+}
+
+// Uses the ExpenseItem API field
+// Required fields as follows:
+// BillableToAccount : bool
+// Description : String
+// ExpenseCategory : ?
+// ExpenseDate : Date
+// ExpenseReportId : ID of associated expense report
+// HaveReceipt : Boolean
+// ID : String? (ID of expense item)
+//
+// Non-Required fields as follows:
+// Miles : Int
+// OdometerStart
+// OdometerEnd
+function buildAddExpenseItemsRequest(travelData, expenseReportID, resourceID, callback)
+{
+	var queryStringHead = "<create xmlns='http://autotask.net/ATWS/v1_6/'><Entities>"
+	var queryStringTail = "</Entities></create>"
+	var query = ""
+	var cachedItems = 0
+	for (var i = 0; i < travelData.length; i++)
+	{
+		var day = travelData[i]
+		for (var j = 0; j < day.length; j++)
+		{
+			var trip = day[j]
+
+			var associatedAccount = trip.toAccountID
+			if (associatedAccount == -1)
+				associatedAccount = trip.fromAccountID
+			if (associatedAccount == -1)
+				continue
+
+			if (accountIDToAnnualProjectMap[associatedAccount])
+			{
+				travelData[i][j].annualProjectID = accountIDToAnnualProjectMap[associatedAccount]
+				trip.annualProjectID = travelData[i][j].annualProjectID
+			}
+
+			var ticketDate = trip.arriveTime
+			if (ticketDate == -1)
+				ticketDate = ticket.leaveTime
+			if (ticketDate == -1)  // Basic error checking
+				continue
+
+			// If it is cached, ignore it
+			if (cachedExpenseItemHashes[hashTrip(trip)] && !ignoreCache)
+			{
+				console.log("Ignoring cached expense")
+				cachedItems++
+				continue
+			}
+
+			// Save the current trip into the expenseItem cache
+			cachedExpenseItemHashes[hashTrip(trip)] = true
+
+			// Calculate the dollar amount owed based on distance and reimbursement values
+			var receiptAmount = parseFloat(trip.distance) * config.DOLLARS_PER_MILE
+
+			query +=	"<Entity xsi:type='ExpenseItem' xmlns:xsi='http://www.w3.org/2001/XMLSchema-instance'>" +
+						"<AccountID>" + associatedAccount + "</AccountID>" +
+						"<ReceiptAmount>" + (Math.round(receiptAmount * 100) / 100) + "</ReceiptAmount>" +
+						"<BillableToAccount>" + "True" + "</BillableToAccount>" +
+						"<Description>" + TRAVEL_DESCRIPTION + " " + trip.fromName + " to " + trip.toName + "</Description>" +
+						"<Destination>" + trip.toName + "</Destination>" +
+						"<ExpenseCategory>" + 2 + "</ExpenseCategory>" + // 2 = Mileage
+						"<ExpenseDate>" + formatDate(ticketDate) + "</ExpenseDate>" +
+						"<ExpenseReportID>" + expenseReportID + "</ExpenseReportID>" +
+						"<HaveReceipt>" + "True" + "</HaveReceipt>" +
+						"<Miles>" + trip.distance + "</Miles>" +
+						"<Origin>" + trip.fromName + "</Origin>" +
+						"<PaymentType>" + 14 + "</PaymentType>" + // Associated with the "Expense Type" field. 14 = "Other"
+					"</Entity>"
+		}
+	}
+
+	//console.log("Request: " + queryStringHead + query + queryStringTail),
+	sendRequest(queryStringHead + query + queryStringTail, resourceID, function(apiResponse) {
+		xml2js(apiResponse, function(err, result) {
+			var expenseItems = getCreateEntities(result)
+
+			if (expenseItems == undefined || expenseItems.length == 0) // This would happen if all expenses were logged
+			{
+				if (cachedItems > 0)
+				{
+					addReturnLog(STATUS_ERR, "Skipped " + cachedItems + " previously generated expense items by default. You can change this behavior in the extension's settings", resourceID)
+					callback(undefined)
+				}
+				else
+				{
+					//console.log("Query: " + query)
+					addReturnLog(STATUS_ERR, "Failed to create new expense items. Response:\n" + JSON.stringify(result), resourceID)
+					callback(undefined)
+				}
+			}
+			else
+			{
+				if (cachedItems > 0)
+				{
+					addReturnLog(STATUS_WARN, "Ignoring " + cachedItems + " previously generated expense items by default. You can change this behavior in the extension's settings", resourceID)
+				}
+				//console.log(j(result))
+				addReturnLog(STATUS_GOOD, "Created " + expenseItems.length + " expense items", resourceID)
+				callback("true")
+			}
+			//callback(result)
+		})
+	}, "create")
+}
+
 // TODO : For administrators. Travel times will stop working after August until the new (e.g 2020-2021 Annual Projects) projects are created
 //
-// For there seems to be some glitch in the API where having multiple expressions per field and multiple fields
+// There seems to be a bug in the API where having multiple expressions per field and multiple fields causes the query to not be evaluated properly
 // The result is that only the first expression is evaluated and the others are ignored
+//
+// This function takes a list of accounts and attempts to find the annual projects associated with them for the given year
 function buildFindTravelProjectQuery(accountIDs, resourceID, callback)
 {
 	var projectIDs = []
@@ -855,37 +1018,55 @@ function buildFindTravelProjectQuery(accountIDs, resourceID, callback)
 
 }
 
-function buildRolesQuery(resourceIDs, resourceID, callback)
+// This function takes the annual project's ID's from the above function and in turn finds their corresponding "Task" entities
+// Why the API makes us jump through so many hoops to get simple information, I'll never know
+function buildFindTravelProjectTaskQuery(projectIDs, resourceID, callback)
 {
-	var reportID = -1
+	var taskIDs = []
 
-	var queryStringHead = "<query xmlns='http://autotask.net/ATWS/v1_6/'><sXML><![CDATA[<queryxml><entity>Role</entity><query><field>ID"
+	var queryStringHead = "<query xmlns='http://autotask.net/ATWS/v1_6/'><sXML><![CDATA[<queryxml><entity>Task</entity><query>"//<field>ProjectID"
 	var queryStringTail = "</field></query></queryxml>]]></sXML></query>"
 	
 	var query = ""
-	for (var i = 0; i < resourceIDs.length; i++)
+	/*for (var i = 0; i < projectIDs.length; i++)
 	{
-		query += "<expression op='equals'>" + resourceIDs[i] + "</expression>"
-	}
+		query += "<expression op='equals'>" + projectIDs[i] + "</expression>"
+	}*/
 
-	//console.log(queryStringHead + query + queryStringTail)
+	query += "<field>Title"
+	query += "<expression op='equals'>" + "Travel Time" + "</expression>"
+
 	sendRequest(queryStringHead + query + queryStringTail, resourceID, function(apiResponse) {
 		xml2js(apiResponse, function(err, result) {
-			var reports = getEntities(result)
-			if (reports == undefined || reports.length == 0)
+			var projects = getEntities(result)
+			if (projects == undefined || projects.length == 0)
 			{
-				addReturnLog(STATUS_WARN, "No roles found for resources: " + j(resourceIDs) + " (this means these people likely aren't field technicians)", resourceID)
+				addReturnLog(STATUS_ERR, "No tasks found for annual projects with IDs: " + j(projectIDs), resourceID)
 				callback(undefined)
 			}
 			else
 			{
-				callback(reports)
+				for (var i = 0; i < projects.length; i++)
+				{
+					if (projectIDs.indexOf(projects[i].ProjectID[0]._) >= 0)
+					{
+						annualProjectIDToTaskIDMap[projects[i].ProjectID[0]._] = projects[i].id[0]
+						taskIDs.push(projects[i].id[0])
+					}
+				}
+				//console.log(j(result))
+				callback(taskIDs)
 			}
 		})
 	})
 
 }
 
+// This function takes a resource and finds its corresponding resourceRoles
+// ResourceRole can be field tech, grid, or any other company position
+// Resources can have more than one Resource Role.
+// The function below, buildRolesQuery, will use the RoleID found from this function, to get the name of the Role
+// ... Again... No idea why this API has to be so convoluted
 function buildResourceRoleQuery(resourceID, callback)
 {
 	var reportID = -1
@@ -912,174 +1093,35 @@ function buildResourceRoleQuery(resourceID, callback)
 
 }
 
-function buildFindExpenseReportQuery(desiredName, resourceID, callback)
+// This function takes a list of roles (probably just one, most resources have only one role), and returns the information associated with that role
+// Roles can include field technician, grid, or other various company positions
+function buildRolesQuery(roleIDs, resourceID, callback)
 {
 	var reportID = -1
 
-	var queryStringHead = "<query xmlns='http://autotask.net/ATWS/v1_6/'><sXML><![CDATA[<queryxml><entity>ExpenseReport</entity><query><field>name"
+	var queryStringHead = "<query xmlns='http://autotask.net/ATWS/v1_6/'><sXML><![CDATA[<queryxml><entity>Role</entity><query><field>ID"
 	var queryStringTail = "</field></query></queryxml>]]></sXML></query>"
-
-	var query = "<expression op='equals'>" + desiredName + "</expression>"
+	
+	var query = ""
+	for (var i = 0; i < roleIDs.length; i++)
+	{
+		query += "<expression op='equals'>" + roleIDs[i] + "</expression>"
+	}
 
 	sendRequest(queryStringHead + query + queryStringTail, resourceID, function(apiResponse) {
 		xml2js(apiResponse, function(err, result) {
 			var reports = getEntities(result)
 			if (reports == undefined || reports.length == 0)
 			{
-				addReturnLog(STATUS_WARN, "No expense reports found found for this month (creating a new one)", resourceID)
-				callback(-1)
-			}
-			else
-			{
-				reportID = reports[0].id[0]
-
-				callback(reportID)
-			}
-		})
-	})
-
-}
-
-function buildCreateExpenseReportRequest(desiredName, ticketDate, requesterID, callback)
-{
-	var monthEndDate = new Date(ticketDate)   // Set the expense report to end at the end of the month
-	monthEndDate.setMonth(monthEndDate.getMonth() + 1) // Set the date to next month
-	monthEndDate.setDate(0)      // This will wrap the date to the last day of the previous month
-	monthEndDate.setHours(23)    // just before midnight
-	monthEndDate.setMinutes(59)  // "
-	monthEndDate.setSeconds(59)  // "
-
-	//console.log("Week ending: " + ticketDate + " " + monthEndDate + " " + formatDate(monthEndDate))
-	var queryStringHead = "<create xmlns='http://autotask.net/ATWS/v1_6/'><Entities>"
-	var queryStringTail = "</Entities></create>"
-	var query =     "<Entity xsi:type='ExpenseReport' xmlns:xsi='http://www.w3.org/2001/XMLSchema-instance'>" +
-			"<Name>" + desiredName + "</Name>" +
-			"<SubmitterID>" + requesterID + "</SubmitterID>" +
-			"<WeekEnding>" + formatDate(monthEndDate) + "</WeekEnding>"  +
-			"</Entity>"
-
-	sendRequest(queryStringHead + query + queryStringTail, resourceID, function(apiResponse) {
-		xml2js(apiResponse, function(err, result) {
-			var expenseReports = getCreateEntities(result)
-
-			if (expenseReports == undefined || expenseReports.length == 0)
-			{
-				addReturnLog(STATUS_ERR, "Failed to create new expense report.\nResponse:\n" + j(result), requesterID)
+				addReturnLog(STATUS_WARN, "No roles found for resources: " + j(resourceIDs) + " (this means these people likely aren't field technicians)", resourceID)
 				callback(undefined)
 			}
 			else
 			{
-				addReturnLog(STATUS_GOOD, "Successfully created expense report", requesterID)
-				callback(expenseReports[0].id[0])
+				callback(reports)
 			}
-			//callback(result)
 		})
-	}, "create")
-}
-
-// Uses the ExpenseItem API field
-// Required fields as follows:
-// BillableToAccount : bool
-// Description : String
-// ExpenseCategory : ?
-// ExpenseDate : Date
-// ExpenseReportId : ID of associated expense report
-// HaveReceipt : Boolean
-// ID : String? (ID of expense item)
-//
-// Non-Required fields as follows:
-// Miles : Int
-// OdometerStart
-// OdometerEnd
-function buildAddExpenseItemsRequest(travelData, expenseReportID, resourceID, callback) // Note: Needs <create> tag surrounding the entity tag
-{
-	var queryStringHead = "<create xmlns='http://autotask.net/ATWS/v1_6/'><Entities>"
-	var queryStringTail = "</Entities></create>"
-	var query = ""
-	var cachedItems = 0
-	for (var i = 0; i < travelData.length; i++)
-	{
-		var day = travelData[i]
-		for (var j = 0; j < day.length; j++)
-		{
-			var trip = day[j]
-
-			var associatedAccount = trip.toAccountID
-			if (associatedAccount == -1)
-				associatedAccount = trip.fromAccountID
-			if (associatedAccount == -1)
-				continue
-
-			if (accountIDToAnnualProjectMap[associatedAccount])
-			{
-				travelData[i][j].annualProjectID = accountIDToAnnualProjectMap[associatedAccount]
-				trip.annualProjectID = travelData[i][j].annualProjectID
-			}
-
-			var ticketDate = trip.arriveTime
-			if (ticketDate == -1)
-				ticketDate = ticket.leaveTime
-			if (ticketDate == -1)
-				continue
-
-			if (cachedExpenseItemHashes[hashTrip(trip)] && !ignoreCache)
-			{
-				console.log("Ignoring cached expense")
-				cachedItems++
-				continue
-			}
-			cachedExpenseItemHashes[hashTrip(trip)] = true
-			var receiptAmount = parseFloat(trip.distance) * config.DOLLARS_PER_MILE
-
-			query +=	"<Entity xsi:type='ExpenseItem' xmlns:xsi='http://www.w3.org/2001/XMLSchema-instance'>" +
-						"<AccountID>" + associatedAccount + "</AccountID>" +
-						"<ReceiptAmount>" + (Math.round(receiptAmount * 100) / 100) + "</ReceiptAmount>" +
-						"<BillableToAccount>" + "True" + "</BillableToAccount>" +
-						"<Description>" + TRAVEL_DESCRIPTION + " " + trip.fromName + " to " + trip.toName + "</Description>" +
-						"<Destination>" + trip.toName + "</Destination>" +
-						"<ExpenseCategory>" + 2 + "</ExpenseCategory>" + // 2 = Mileage
-						"<ExpenseDate>" + formatDate(ticketDate) + "</ExpenseDate>" +
-						"<ExpenseReportID>" + expenseReportID + "</ExpenseReportID>" +
-						"<HaveReceipt>" + "True" + "</HaveReceipt>" +
-						"<Miles>" + trip.distance + "</Miles>" +
-						"<Origin>" + trip.fromName + "</Origin>" +
-						"<PaymentType>" + 14 + "</PaymentType>" + // Associated with the "Expense Type" field. 14 = "Other"
-					"</Entity>"
-		}
-	}
-
-	//console.log("Request: " + queryStringHead + query + queryStringTail),
-	sendRequest(queryStringHead + query + queryStringTail, resourceID, function(apiResponse) {
-		xml2js(apiResponse, function(err, result) {
-			var expenseItems = getCreateEntities(result)
-
-			if (expenseItems == undefined || expenseItems.length == 0) // This would happen if all expenses were logged
-			{
-				if (cachedItems > 0)
-				{
-					addReturnLog(STATUS_ERR, "Skipped " + cachedItems + " previously generated expense items by default. You can change this behavior in the extension's settings", resourceID)
-					callback(undefined)
-				}
-				else
-				{
-					//console.log("Query: " + query)
-					addReturnLog(STATUS_ERR, "Failed to create new expense items. Response:\n" + JSON.stringify(result), resourceID)
-					callback(undefined)
-				}
-			}
-			else
-			{
-				if (cachedItems > 0)
-				{
-					addReturnLog(STATUS_WARN, "Ignoring " + cachedItems + " previously generated expense items by default. You can change this behavior in the extension's settings", resourceID)
-				}
-				//console.log(j(result))
-				addReturnLog(STATUS_GOOD, "Created " + expenseItems.length + " expense items", resourceID)
-				callback("true")
-			}
-			//callback(result)
-		})
-	}, "create")
+	})
 }
 
 // Uses the __ API field
@@ -1097,6 +1139,9 @@ function buildAddExpenseItemsRequest(travelData, expenseReportID, resourceID, ca
 // ContractID
 // SummaryNotes
 // TaskID
+//
+// This function takes Travel data, formatted as travel times, and sends the "create" requests to the API
+// Before it does that, it makes sure that the requesting resource is a field technician. Otherwise they will not have the annual projects added
 function buildAddTravelTimeRequest(travelData, resourceID, callback)
 {
 	buildResourceRoleQuery(resourceID, function(entities) {
@@ -1141,8 +1186,8 @@ function buildAddTravelTimeRequest(travelData, resourceID, callback)
 					for (var j = 0; j < day.length; j++)
 					{
 						var trip = day[j]
-						//log("Trip", JSON.stringify(trip))
 						
+						// From global variables. Does as the variable names imply
 						if (!config.LOG_FIRST_TRAVEL_TIME_ENTRY_OF_DAY)
 						{
 							if (trip.fromAccountID == -1)
@@ -1154,13 +1199,20 @@ function buildAddTravelTimeRequest(travelData, resourceID, callback)
 								continue
 						}
 
-						if (trip.totalTimeHours == 0)
+						// Sometimes a field tech will log a ticket at two different locations at the same time
+						// In this case (there could be many reasons for it, e.g quickly solving a ticket remotely)
+						// For this edge case we won't upload any information, but we will give a descriptive warning
+						if (trip.totalTimeHours <= 0)
 						{
-							addReturnLog(STATUS_WARN, "Skipping time entry for the trip from " + trip.fromName + " to " + trip.toName + " on " + new Date(trip.startTime).toLocaleString() + "\nReason: travel time has been calculated as 0 minutes", resourceID)
+							addReturnLog(STATUS_WARN, "Skipping time entry for the trip from " + trip.fromName + " to " + trip.toName + " on " + new Date(trip.startTime).toLocaleString() + "\nReason: travel time has been calculated as 0 minutes.\nYou may have to add this entry manually", resourceID)
 							continue
 						}
 						//console.log("Trip before: " + JSON.stringify(travelData][i][j]))
 
+						// The associated account section below is determining which school to charge.
+						// If you are headed to a school you change the destination
+						// If you are heading home you change the origin
+						// The same logic should apply for changes to the Vinson Group
 						var associatedAccount = trip.toAccountID
 						if (associatedAccount == -1)
 							associatedAccount = trip.fromAccountID
@@ -1170,6 +1222,7 @@ function buildAddTravelTimeRequest(travelData, resourceID, callback)
 							continue
 						}
 
+						// Add extra cached information into the trip object
 						if (accountIDToAnnualProjectMap[associatedAccount])
 						{
 							travelData[i][j].annualProjectID = accountIDToAnnualProjectMap[associatedAccount]
@@ -1216,6 +1269,8 @@ function buildAddTravelTimeRequest(travelData, resourceID, callback)
 							console.log("Ignoring cached trip")
 							continue
 						}
+
+						// Save the trip into the cache for future requests
 						cachedTimeEntryHashes[hashTrip(trip)] = true
 
 						query +="<Entity xsi:type='TimeEntry' xmlns:xsi='http://www.w3.org/2001/XMLSchema-instance'>" +
@@ -1254,6 +1309,16 @@ function buildAddTravelTimeRequest(travelData, resourceID, callback)
 	})	
 }
 
+
+
+
+
+
+/*  ***  OTHER USEFUL API FUNCTIONS  ***  */
+
+
+// This function can be used to query data values specific to certain fields. For example, a Role has multiple values associated with it that Vinson has defined
+// Use this function to find the exact values of those entries (i.e field tech roleID == 8)
 function getFieldInfo(entity, callback, resourceID = "null")
 {
 
@@ -1266,6 +1331,7 @@ function getFieldInfo(entity, callback, resourceID = "null")
 	}, "GetFieldInfo")
 }
 
+// This function is used specifically to query facts about the api user. For example, how many requests have been made this hour to the API
 function getThresholdAndUsageInfo(callback, resourceID = "null")
 {
 	var query = "<GetThresholdAndUsageInfo xmlns='http://autotask.net/ATWS/v1_6/'></GetThresholdAndUsageInfo>"
@@ -1278,8 +1344,21 @@ function getThresholdAndUsageInfo(callback, resourceID = "null")
 	}, "getThresholdAndUsageInfo", true) // Case sensitive
 }
 
+
+
+
+
+
+
+/*  ***  API Helper Specific function  ***  */
+
+
+// This function is a critical part of the program
+// It keeps track of error messages for every user making requests and formats them such that the client can recieve and view information properly
+// The response will be handled by the client-side browser extension via the Vinson-Autotask extension
+// Response are generated throughout the uploading process, and result in an array of updates that the client can use to interpret the results of the upload
 var returnMessage = {} 
-function addReturnLog(messageStatus, message, resourceID = "null")
+function addReturnLog(messageStatus, message, resourceID = "null") // The null resourceID will be used for any errors that occur before the program can query the resource ID
 {
 	if (!returnMessage[resourceID])
 	{
@@ -1290,7 +1369,9 @@ function addReturnLog(messageStatus, message, resourceID = "null")
 	returnMessage[resourceID].push({"status": messageStatus, "message": message})
 }
 
-//Note: These values are actually TimeEntries from the API, not technically tickets. Just easier to understand this way I think
+// Note: These values are actually TimeEntries from the API, not technically tickets. Just easier to understand this way I think
+// The purpose of this function is to trim down the large amount of information stored within each time entry and store them into a cleaner object
+// It is crucial that the tickets are sorted as well, as the API returns them sorted by their ID (with no option to change that)
 function parseTicketsInformation(tickets, resourceID, callback)
 {
 	if (tickets == undefined || tickets.length == 0)
@@ -1306,10 +1387,11 @@ function parseTicketsInformation(tickets, resourceID, callback)
 
 		if (ticket == undefined) continue
 		if (ticket.Type[0]._  == "6")  // Ignore all Travel related time entries (really we probably only want to log tickets where type = 2)
-			continue
+			continue	       // Use getFieldInfo for more information on type
 
 		var ticketData = {}
 
+		// The only actual relevant data needed
 		ticketData.StartDateTime = ticket.StartDateTime[0]._
 		ticketData.EndDateTime = ticket.EndDateTime[0]._
 		ticketData.ContractID = ticket.ContractID[0]._
@@ -1319,15 +1401,42 @@ function parseTicketsInformation(tickets, resourceID, callback)
 
 	ticketsData = sortTickets(ticketsData)
 
-	//console.log("Before: " + j(ticketsData))
-
-	//var contractIDs = ticketsData.map((val) => val.ContractID)
-	//callback(contractIDs) 
 	callback(ticketsData)
 
 }
 
+
+
+
+
+/*  ***  Google Distance Matrix API FUNCTIONS  ***  */
+
+// The purpose of these functions are to take address data from the travelData object, lookup maps data between them, then add that data back to the travelData object
+// The main difficulty is that the matrix API will only respond with up to 100 elements.
+// Since it returns a matrix, it returns the product of origin and destination addresses
+// For example: the trips: (Old Brook high to St. Barnabus), and (Frederick Douglass to St. Leo) will return four responses:
+// 	1. OBH to St B
+// 	2. OBH to St. Leo
+// 	3. Fred Doug to St. B
+// 	4. Fred Doug to St. Leo
+// In other words, from every origin address to every destination address
+// This means that if you are logging more than 10 origins and 10 destinations (quite possible over the course of a month), the matrix api will give an error that the response size has been exceeded (11 * 10 > 100)
+//
+// That difficulty is what makes these next few functions a bit confusing to understand... but bear with me, there are a few reasons I used this API over the Directions API
+// 1. Less overhead in responses: The majority of response data is travel distance and time
+// 2. Simplicity of requests: The requests only ask for origin and destination (as well as optionally units of distance, or other similar things)
+// 3. The structure of the origin to destination type requests caters closely to:
+// 	a) The amount of requests we are making. Directions API requires one at a time or multi-hop requests
+// 	b) The format of origin to dest aligns more closely with the data structures built
+//
+
+
+
+// This function is a helper to getDistanceData below. Basically, when distance data is recieved it is cached.
+// 	The reason this helper has to use the cache to load results back in is because of javascript asynchronous difficulties
 // Inputs distances that are already cached. returns a tuple of [the number of entries that were not found in the cache, updated travel data]
+// Returns the total number of drives that were not in the cache, as well as the travelData object supplemented with data from the cache
+// This function will be repeatedly called until every trip that we need distance data for has been cached
 function loadCachedTravelData(travelData)
 {
 	//console.log("TravelMap: " + j(travelDistanceMap))
@@ -1343,7 +1452,6 @@ function loadCachedTravelData(travelData)
 			var fromID = trip.fromAccountID
 			var toID = trip.toAccountID
 
-			//log("Travel data", trip.fromName + " " + trip.toName + " " +0
 			if (travelDistanceMap[fromID] && travelDistanceMap[fromID][toID]) // if we have this data cached
 			{
 				travelData[i][j].distance = travelDistanceMap[trip.fromAccountID][trip.toAccountID][0]
@@ -1381,36 +1489,26 @@ function loadCachedTravelData(travelData)
 	return [totalDrives - totalCached, travelData]
 }
 
-Set.prototype.toArray = function()
-{
-	var arr = []
-	var iter = this.values()
-	var val = iter.next()
-	while (!val.done)
-	{
-		arr.push(val.value)
-		val = iter.next()
-	}
-
-	return arr
-}
-
+// Google Distance Matrix will only send a maximum of 100 response elements
 var MAX_MATRIX_ELEMENTS = 100
-// Recurses one time in order to 
+
+// This function is recursive
+// It limits the amount of origins and destinations over each iteration, in order to stay below the 100 element limit
+// After each set of data is returned, it uses the cache to determine how many elements are left to be found
+// The base case is when all trips are cached
+// The nice thing about the matrix-style return values is that if we are requesting origin-dest data, it is guaranteed that we will also get dest-origin data in the response
 function getDistanceData(travelData, nodeResponse, requesterID, callback, recursing = false, originParamsOffset = 0)
 {
+	//console.log(1)
 	var cacheData = loadCachedTravelData(travelData)
 
-	//log("Cache data", cacheData[1].length)
 	var uncachedTrips = cacheData[0]
-	//log("UncachedTrips", uncachedTrips + "\n\n")
+	//console.log("uncached: " + uncachedTrips))
 	travelData = cacheData[1]
 
 	// Recursive base case
 	if (uncachedTrips == 0)
 	{
-		//nodeResponse.end(j(travelData))
-
 		callback(travelData)
 		return
 	}
@@ -1424,6 +1522,7 @@ function getDistanceData(travelData, nodeResponse, requesterID, callback, recurs
 
 	var apiURL = "https://maps.googleapis.com/maps/api/distancematrix/json?"
 
+	// Sets are used to remove duplicates
 	var originParams = new Set()
 	var destParams = new Set()
 
@@ -1436,9 +1535,9 @@ function getDistanceData(travelData, nodeResponse, requesterID, callback, recurs
 			var fromID = trip.fromAccountID
 			var toID = trip.toAccountID
 
-			//log("Finding addresses for trip", trip.fromName + " " + trip.toName + " " + trip.fromAddress + " " + trip.toAddress)
 			if (travelDistanceMap[fromID] && travelDistanceMap[fromID][toID]) // if we have this data cached
 			{
+				destParams.add(trip.toAddress)
 				continue
 			}
 			else
@@ -1451,36 +1550,39 @@ function getDistanceData(travelData, nodeResponse, requesterID, callback, recurs
 
 	originParams = originParams.toArray()
 	destParams = destParams.toArray()
+
+	// Estimate if we are going to exceed the 100 response element maximum. If yes, we need to slice the origins up into smaller chunks
+	// and repeat the requests
 	var matrixSize = originParams.length * destParams.length
-	//log("Matrix size", matrixSize + " " + originParams.length + " " + destParams.length)
 	var originChunkSize = 0
 	if (matrixSize >= MAX_MATRIX_ELEMENTS)
 	{
 		originChunkSize = parseInt(100 / destParams.length)
-		originParams = originParams.slice(originParamsOffset, originParamsOffset + originChunkSize)
+		originParams = originParams.slice(0, originChunkSize)//, originParamsOffset + originChunkSize)
 	}
+	console.log("size: " + originChunkSize)
+	console.log("Length: " + originParams.length + " " + destParams.length)
 
-	//log("Origin before", JSON.stringify(originParams))
 	var addresses = originParams.concat(destParams)
 
-	//log("Origin after", JSON.stringify(originParams))
 	var requestURL = apiURL + "origins="+ originParams.join("|") + "&units=" + imperialOrMetric + "&destinations=" + destParams.join("|" )+ "&key=" + config.MAPS_API_KEY
 
 	//console.log(requestURL)
+	// Send the request to the Google Distance Matrix API
 	https.get(requestURL, (resp) => {
   		let data = '';
 
-		// A chunk of data has been recieved.
 		resp.on('data', (chunk) => {
 			data += chunk;
 		});
 
-		// The whole response has been received. Print out the result.
 		resp.on('end', () => {
 			//log("Data", data)
 			parseDistanceMatrix(data, addresses, function() {
+				// If we are going to exceed the maximum, recurse with the sliced data set
 				if (matrixSize >= MAX_MATRIX_ELEMENTS)
 					getDistanceData(travelData, nodeResponse, requesterID, callback, false, originParamsOffset + originChunkSize)
+				// Otherwise, recurse with the "recursing" flag set to true. If everything was requested properly we will hit our base case first
 				else
 					getDistanceData(travelData, nodeResponse, requesterID, callback, true)
 

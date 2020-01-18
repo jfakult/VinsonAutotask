@@ -11,7 +11,7 @@ const STATUS_WARN = 1
 const STATUS_ERR  = 2
 const STATUS_MAP = ["Success", "Warning", "Error"]
 
-var serverIP = "127.0.0.1:8001"
+var serverIP = "http://127.0.0.1:8001"
 
 // Helpful prototypes
 Element.prototype.appendAfter = function (element) {
@@ -187,6 +187,7 @@ function autoGenerateExpenseReport()
 
 	// Start the loading splash
 	var intervalKill = showLoadingSplash()
+	console.log(serverIP + "/generateExpenseReports")
 	
 	// Send server request
 	$.ajax({
@@ -230,12 +231,12 @@ function autoGenerateTravelTimes()
 {
 	var button = document.getElementById("autoGenerateButton")
 	var sibling = document.getElementById("divTableContainer")
-	
+
 	var apiData = JSON.parse(localStorage.API)
 
 	var intervalKill = showLoadingSplash()
 	$.ajax({
-		url: "http://127.0.0.1:8001/generateTravelTimes",
+		url: serverIP + "/generateTravelTimes",
 		type: "post",
 		data: "emailAddress=" + apiData.emailAddress + "&homeAddress=" + apiData.homeAddress + "&rewriteData=" + apiData.rewriteData,
 		success: function(response)
@@ -246,7 +247,7 @@ function autoGenerateTravelTimes()
 				opacity: "0"
 			}, 800)
 			setTimeout(function() {
-				splashBox.parentElement.remove(splashBox)
+				splashBox.remove() //splashBox)
 
 				showResultMessage(response, sibling, function(resultContainer, sibling, val) {
 					var button = document.getElementById("autoGenerateButton")
@@ -259,7 +260,7 @@ function autoGenerateTravelTimes()
 			}, 800)
 
 			//location.reload()
-			console.log("Got response: " + response)
+			//console.log("Got response: " + response)
 		},
 		error: function(err)
 		{
@@ -284,6 +285,9 @@ function showLoadingSplash()
 		position: "fixed",
 		textAlign: "center",
 		width: "400px",
+		top: "8%",
+		background: "whitesmoke",
+		boxShadow: "3px 5px 9px -1px #aab",
 		marginLeft: "calc(50% - 200px)",
 		height: "150px",
 		background: "white",
@@ -342,11 +346,16 @@ function showLoadingSplash()
 // Insert some HTML to do it
 function showResultMessage(response, messageSibling, moveElement, elementPosition)
 {
-	//console.log("response: " + response)
-	if (response == undefined || response.length == 0)
-		response = '[{"status": 2, "message": "No response returned"}]'
+	try
+	{
+		response = JSON.parse(response)
+	}
+	catch (e){ response == undefined }
 
-	console.log("response: " + response)
+	if (response == undefined || response.length == 0 || response == [])
+		response = json.parse('[{"status": 2, "message": "No response returned"}]')
+
+	//console.log("response: " + response)
 
 	var currentTop = parseInt(getComputedStyle(messageSibling).top)
 	if (isNaN(currentTop))
@@ -384,10 +393,9 @@ function showResultMessage(response, messageSibling, moveElement, elementPositio
 
 	resultList.appendChild(resultHeader)
 
-	var responseValues = JSON.parse(response)
-	for (var i = 0; i < responseValues.length; i++)
+	for (var i = 0; i < response.length; i++)
 	{
-		var message = responseValues[i]
+		var message = response[i]
 		var messageStatus = message.status
 		var messageText = message.message
 

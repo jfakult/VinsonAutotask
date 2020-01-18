@@ -19,7 +19,7 @@ function insertAutomationHTML()
 
 	}
 	
-	if (window.location.href.indexOf("/home/timeEntry") >= 0)
+	if (window.location.href.indexOf("wrkEntryListView") >= 0)
 	{
 		var script = document.createElement("script")
 		script.setAttribute("src", "http://127.0.0.1:8001/api_response_helper.js")

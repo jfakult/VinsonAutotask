@@ -318,8 +318,10 @@ function uploadData(postParams, request, nodeResponse)
 			      return
 		      }
 
+		   console.log("Made it2")
 	// Given the travel data, use the addresses of the schools and query google DistanceMatrixAPI to determine driving distance (and duration if needed)
 	       apiTools.getDistanceData(travelData, nodeResponse, resourceID, function(travelData) {
+		   console.log("Made it3")
 		       if (travelData == undefined || travelData.length == 0)
 		       {
 			       sendResponse(nodeResponse, resourceID)
@@ -328,8 +330,9 @@ function uploadData(postParams, request, nodeResponse)
 
 		       // Now we are done collecting data, these functions will upload the data by sending a create request to the API
 
-		       //sendResponse(nodeResponse)  //TODO: temp lock. Uncomment these lines to stop the program from submitting data
+		       //sendResponse(nodeResponse)  //TODO: temp lock. Uncomment these lines to stop the program from submitting data (for testing / debugging)
 		       //return
+
 		       if (generatingTravelTimes)
 		       {
 			       console.log("Generating travel times")
